@@ -1,14 +1,41 @@
-# Galaxy J5 (2015) touchscreen on postmarketOS: SM5703 PMIC patches
+# Samsung Galaxy J5 2015 (SM-J500F) on postmarketOS: kernel patches
 
-The Samsung Galaxy J5 2015 (`samsung-j5`, msm8916) powers its Imagis
-IST3038C touchscreen from LDO3 of a Silicon Mitus SM5703 PMIC. Mainline
-Linux has no driver for that PMIC, so the J5 device tree leaves the
-touchscreen bus disabled with the note
-`FIXME: Missing sm5703-mfd driver to power up vdd-supply`.
+Kernel patches for `linux-postmarketos-qcom-msm8916` (6.12.1) that bring up
+the hardware of the Galaxy J5 2015 (`samsung-j5`, j5lte, msm8916) which the
+mainline kernel and postmarketOS left unsupported, plus a script that drops
+them into a pmbootstrap checkout so the stock kernel package is rebuilt with
+them.
 
-This repo carries kernel patches that fix that, plus a script that drops
-them into a pmbootstrap checkout so the stock postmarketOS kernel package
-(`linux-postmarketos-qcom-msm8916`, 6.12.1) gets rebuilt with them.
+What the series adds, in order:
+
+1. **SM5703 PMIC core and regulators** (patches 1 and 2). The J5 uses a
+   Silicon Mitus SM5703 for its LDOs, buck, charger, flash LED and fuel
+   gauge, and mainline has no driver for it. These are the 2022 upstream
+   submission by Markuss Broks adapted to 6.12, with the USB LDO enable
+   register corrected against Samsung's downstream driver.
+2. **Touchscreen** (patch 3). The Imagis IST3038C is powered from SM5703
+   LDO3; the device tree now describes the PMIC on BLSP I2C6, feeds LDO3 to
+   the touchscreen and enables its bus. This was the original "touchscreen
+   broken without SM5703 MFD driver" entry on the wiki.
+3. **Vibrator, touch keys, proximity sensor** (patches 4 and 5). The motor
+   is SM5703 LDO2 behind a regulator-haptic node, the two capacitive keys
+   are a Coreriver TC300K (which needed a new press/release bitmap variant
+   in the tm2-touchkey driver), and the GP2AP002 proximity sensor works once
+   GPIO 73 is driven as its power enable.
+4. **Battery** (patches 6, 7, 11, 12). A new power-supply driver for the
+   SM5703 fuel gauge (percentage, voltage, current, chip temperature,
+   low-battery alert, Samsung battery table programming), and a read-only
+   charger power supply that tells the fuel gauge whether external power is
+   present. Before these the phone exposed no battery at all.
+5. **Front camera** (patches 8 to 10). A new V4L2 driver for the S5K5E3YX
+   sensor with modes from Samsung's Exynos tables, a 26 MHz MCLK entry in
+   the msm8916 clock driver, and CCI/camss wiring in the device tree.
+6. **Screen brightness** (patch 13). A backlight device for the AMOLED
+   panel with a port of Samsung's smart-dimming gamma generation, so the
+   brightness slider works across 62 levels from 5 to 360 cd.
+
+Hardware facts come from the downstream Samsung kernel for j5lte
+(`msm8916-sec-j5lte-eur-r05.dtsi` and the related driver sources).
 
 ## Contents
 
@@ -31,13 +58,13 @@ them into a pmbootstrap checkout so the stock postmarketOS kernel package
 | `pmaports/apply.sh` | Installs the patches and kernel config options into pmaports |
 | `pmaports/kconfig.fragment` | `CONFIG_MFD_SM5703=m`, `CONFIG_REGULATOR_SM5703=m`, `CONFIG_GP2AP002=m`, `CONFIG_BATTERY_SM5703=m`, `CONFIG_VIDEO_S5K5E3=m`, `CONFIG_CHARGER_SM5703=m` |
 
-The drivers are the v5 submission by Markuss Broks from April 2022
-("Add support for Silicon Mitus SM5703 MFD"), adapted to kernel 6.12 and
-with one register fix: the USB LDO enable bits live in the control
-register 0x0C, as in Samsung's downstream driver, not in the LDO3
-register. The device tree values (I2C address 0x49 on GPIO 22/23, reset
-on GPIO 24, LDO3 at 3.0 V for the touchscreen, USBLDO1 always on) come
-from the downstream `msm8916-sec-j5lte-eur-r05.dtsi`.
+Patch provenance: the SM5703 PMIC and regulator drivers are the v5
+submission by Markuss Broks from April 2022 ("Add support for Silicon
+Mitus SM5703 MFD"), adapted to kernel 6.12, with the USB LDO enable bits
+moved to the control register 0x0C as in Samsung's downstream driver.
+Device-tree values (SM5703 at 0x49 on GPIO 22/23 with reset on GPIO 24,
+LDO3 at 3.0 V for the touchscreen, USBLDO1 always on, and all the GPIOs
+listed in the table above) come from the downstream j5lte device tree.
 
 ## Build and flash
 
