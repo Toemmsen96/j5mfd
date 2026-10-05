@@ -57,6 +57,7 @@ Hardware facts come from the downstream Samsung kernel for j5lte
 | `patches/0014-drm-panel-samsung-s6e8aa5x01-ams497hy01-Send-brightn*.patch` | Brightness updates in DSI low-power mode (avoids DSI FIFO errors on every slider change) |
 | `patches/0015-arm64-dts-qcom-msm8916-samsung-j5-Vote-display-memory*.patch` | Display memory bandwidth vote (mdp0-mem interconnect) against MDP underflows; needs the msm8916 interconnect driver enabled |
 | `patches/0016-drm-msm-dsi-28nm-lp-PHY-Use-the-MSM8916-vendor-regul*.patch` | DSI PHY regulator programmed with the msm8916 vendor values instead of the generic msm8974 ones (candidate fix for the grey-noise display artefact) |
+| `patches/0017-drm-msm-dsi-28nm-lp-PHY-Use-vendor-D-PHY-timings-at-*.patch` | Test: vendor D-PHY timings for this panel's 500 Mbit/s rate instead of the computed ones (display noise experiment) |
 | `kernel/` | The new source files as plain files, for reading or reuse |
 | `pmaports/apply.sh` | Installs the patches and kernel config options into pmaports |
 | `pmaports/kconfig.fragment` | `CONFIG_MFD_SM5703=m`, `CONFIG_REGULATOR_SM5703=m`, `CONFIG_GP2AP002=m`, `CONFIG_BATTERY_SM5703=m`, `CONFIG_VIDEO_S5K5E3=m`, `CONFIG_CHARGER_SM5703=m`, `CONFIG_INTERCONNECT_QCOM=y`, `CONFIG_INTERCONNECT_QCOM_MSM8916=y` |
@@ -159,7 +160,8 @@ gsettings set org.gnome.shell.keybindings toggle-application-view "['<Super>a', 
   vote) made no difference, so it is not an underflow. Comparing the DSI
   PHY setup with the vendor kernel found the PHY regulator block
   programmed with msm8974 values; patch 16 switches the msm8916 PHY to the
-  vendor settings (being tested).
+  vendor settings, which made it slightly better but not gone; patch 17
+  additionally applies the vendor D-PHY timing values (being tested).
 - Patches 11 and 12 (charger status): compile-tested, not yet run on
   hardware. On a PC USB port the battery current hovers around zero, so
   without them the status flips between Charging and Discharging every few

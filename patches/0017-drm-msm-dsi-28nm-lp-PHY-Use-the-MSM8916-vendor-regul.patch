@@ -1,0 +1,64 @@
+From d69061e05696df07df1850e9c000b72c98a2b4aa Mon Sep 17 00:00:00 2001
+From: Toemmsen96 <147745097+Toemmsen96@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 21:15:28 +0200
+Subject: [PATCH] drm/msm/dsi: 28nm-lp PHY: Use the MSM8916 vendor regulator
+ settings
+
+The 28nm-lp DSI PHY (MSM8916) is programmed with the generic 28nm
+regulator values (CTRL_0/1/2 = 0x07/0x09/0x03), which are the MSM8974
+settings. The MSM8916 vendor kernel uses [03 08 07 00 20 07 01] for
+qcom,platform-regulator-settings and writes CTRL_1 = 0x08, CTRL_2 = 0x07,
+CTRL_3 = 0, CTRL_4 = 0x20, CAL_PWR_CFG = 1, LDO_CNTRL = 0 and finally
+CTRL_0 = 0x03, with a 1 ms settle after enabling calibration
+(msm_mdss_io_8974.c, DCDC path). On the Samsung Galaxy J5 (2015) the
+mainline values leave the HS lanes marginal: uniform light areas show
+coloured pattern-dependent noise towards the right edge of the screen,
+without any host-side DSI error. Use the vendor sequence for the LP PHY.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/msm/dsi/phy/dsi_phy_28nm.c | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_28nm.c b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_28nm.c
+index 1383e3a4e..7e6dd465b 100644
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_28nm.c
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_28nm.c
+@@ -5,6 +5,7 @@
+ 
+ #include <linux/clk.h>
+ #include <linux/clk-provider.h>
++#include <linux/delay.h>
+ 
+ #include "dsi_phy.h"
+ #include "dsi.xml.h"
+@@ -752,6 +753,26 @@ static void dsi_28nm_phy_regulator_enable_dcdc(struct msm_dsi_phy *phy)
+ {
+ 	void __iomem *base = phy->reg_base;
+ 
++	if (phy->cfg->quirks & DSI_PHY_28NM_QUIRK_PHY_LP) {
++		/*
++		 * MSM8916: regulator settings and sequence from the vendor
++		 * kernel (qcom,platform-regulator-settings = [03 08 07 00 20
++		 * 07 01], msm_mdss_io_8974.c). The generic values below are
++		 * the MSM8974 ones and leave the HS lane drivers marginal on
++		 * some panels (bit errors visible as coloured noise).
++		 */
++		writel(0x0, base + REG_DSI_28nm_PHY_REGULATOR_CTRL_0);
++		writel(1, base + REG_DSI_28nm_PHY_REGULATOR_CAL_PWR_CFG);
++		usleep_range(1000, 1100);
++		writel(0x8, base + REG_DSI_28nm_PHY_REGULATOR_CTRL_1);
++		writel(0x7, base + REG_DSI_28nm_PHY_REGULATOR_CTRL_2);
++		writel(0x0, base + REG_DSI_28nm_PHY_REGULATOR_CTRL_3);
++		writel(0x20, base + REG_DSI_28nm_PHY_REGULATOR_CTRL_4);
++		writel(0x00, phy->base + REG_DSI_28nm_PHY_LDO_CNTRL);
++		writel(0x3, base + REG_DSI_28nm_PHY_REGULATOR_CTRL_0);
++		return;
++	}
++
+ 	writel(0x0, base + REG_DSI_28nm_PHY_REGULATOR_CTRL_0);
+ 	writel(1, base + REG_DSI_28nm_PHY_REGULATOR_CAL_PWR_CFG);
+ 	writel(0, base + REG_DSI_28nm_PHY_REGULATOR_CTRL_5);
+-- 
+2.56.0
+
