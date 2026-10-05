@@ -1,0 +1,105 @@
+From 73bc3c2378961c4d512c122599ca4d31901afa99 Mon Sep 17 00:00:00 2001
+From: Toemmsen96 <147745097+Toemmsen96@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 16:52:25 +0200
+Subject: [PATCH 3/3] arm64: dts: qcom: msm8916-samsung-j5: Add SM5703 PMIC and
+ enable touchscreen
+
+The Galaxy J5 (2015) powers its Imagis IST3038C touchscreen from LDO3 of
+the Silicon Mitus SM5703 PMIC, which sits at address 0x49 on BLSP I2C6
+(GPIO 22/23) with its MRSTB reset line on GPIO 24. Describe the PMIC and
+its regulators, mirroring the downstream device tree (LDO1 2.8 V camera
+sensor, LDO2 motor, LDO3 3.0 V touchscreen, buck 1.5 V camera core,
+USBLDO1 always on), feed LDO3 to the touchscreen and drop the override
+that kept the touchscreen bus disabled.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../boot/dts/qcom/msm8916-samsung-j5.dts      | 61 ++++++++++++++++++-
+ 1 file changed, 58 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts b/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts
+index 549e7c03e..6d1fd95b0 100644
+--- a/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts
++++ b/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts
+@@ -15,8 +15,53 @@ &accelerometer {
+ 	vddio-supply = <&pm8916_l5>;
+ };
+ 
+-&blsp_i2c5 {
+-	status = "disabled";
++&blsp_i2c6 {
++	status = "okay";
++
++	pmic@49 {
++		compatible = "siliconmitus,sm5703";
++		reg = <0x49>;
++
++		reset-gpios = <&tlmm 24 GPIO_ACTIVE_LOW>;
++
++		pinctrl-0 = <&pmic_reset_default>;
++		pinctrl-names = "default";
++
++		regulators {
++			reg_cam_sensor_a2p8: ldo1 {
++				regulator-name = "cam_sensor_a2p8";
++				regulator-min-microvolt = <2800000>;
++				regulator-max-microvolt = <2800000>;
++			};
++
++			reg_vdd_motor: ldo2 {
++				regulator-name = "vdd_motor";
++				regulator-min-microvolt = <1500000>;
++				regulator-max-microvolt = <3300000>;
++			};
++
++			reg_vdd_tsp: ldo3 {
++				regulator-name = "vdd_tsp";
++				regulator-min-microvolt = <3000000>;
++				regulator-max-microvolt = <3000000>;
++			};
++
++			reg_cam_sensor_core: buck {
++				regulator-name = "cam_sensor_core";
++				regulator-min-microvolt = <1500000>;
++				regulator-max-microvolt = <1500000>;
++			};
++
++			reg_usbldo1: usbldo1 {
++				regulator-name = "usbldo1";
++				regulator-always-on;
++			};
++
++			reg_usbldo2: usbldo2 {
++				regulator-name = "usbldo2";
++			};
++		};
++	};
+ };
+ 
+ &front_flash_led {
+@@ -37,7 +82,7 @@ &reg_vdd_lcd_1p8 {
+ };
+ 
+ &touchscreen {
+-	/* FIXME: Missing sm5703-mfd driver to power up vdd-supply */
++	vdd-supply = <&reg_vdd_tsp>;
+ };
+ 
+ &usb_hs_phy {
+@@ -51,3 +96,13 @@ &lcd_1p8_ldo_en_default {
+ &vtcam_flash_en_default {
+ 	pins = "gpio50";
+ };
++
++&tlmm {
++	pmic_reset_default: pmic-reset-default-state {
++		pins = "gpio24";
++		function = "gpio";
++
++		drive-strength = <2>;
++		bias-disable;
++	};
++};
+-- 
+2.56.0
+

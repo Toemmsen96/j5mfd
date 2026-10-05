@@ -1,0 +1,242 @@
+From b27dab298a33879a5ed38a695d7affd2fa8a1737 Mon Sep 17 00:00:00 2001
+From: Markuss Broks <markuss.broks@gmail.com>
+Date: Mon, 5 Oct 2026 16:52:25 +0200
+Subject: [PATCH 2/3] regulator: sm5703-regulator: Add regulators support for
+ the SM5703 PMIC
+
+The regulator block of the SM5703 controls three LDOs (1.5 V to 3.3 V),
+one buck (1.0 V to 3.0 V), two fixed 4.8 V USB LDOs and the 5 V VBUS
+boost used for USB OTG.
+
+This is the v5 submission from April 2022 [1]. The LDO voltage table
+lists all eight selector values (the top three all map to 3.3 V) so the
+regmap helpers never see a selector outside the table.
+
+[1] https://lkml.iu.edu/2204.2/09435.html
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ drivers/regulator/Kconfig            |   8 ++
+ drivers/regulator/Makefile           |   1 +
+ drivers/regulator/sm5703-regulator.c | 178 +++++++++++++++++++++++++++
+ 3 files changed, 187 insertions(+)
+ create mode 100644 drivers/regulator/sm5703-regulator.c
+
+diff --git a/drivers/regulator/Kconfig b/drivers/regulator/Kconfig
+index 39297f7d8..7f07d5f1b 100644
+--- a/drivers/regulator/Kconfig
++++ b/drivers/regulator/Kconfig
+@@ -1373,6 +1373,14 @@ config REGULATOR_SLG51000
+ 	  The SLG51000 is seven compact and customizable low dropout
+ 	  regulators.
+ 
++config REGULATOR_SM5703
++	tristate "Silicon Mitus SM5703 regulators"
++	depends on MFD_SM5703
++	help
++	  This driver provides support for the voltage regulators of the
++	  Silicon Mitus SM5703 PMIC: three LDOs, one buck, two USB LDOs
++	  and the VBUS boost output.
++
+ config REGULATOR_STM32_BOOSTER
+ 	tristate "STMicroelectronics STM32 BOOSTER"
+ 	depends on ARCH_STM32 || COMPILE_TEST
+diff --git a/drivers/regulator/Makefile b/drivers/regulator/Makefile
+index 3d5a803dc..a61fa42b1 100644
+--- a/drivers/regulator/Makefile
++++ b/drivers/regulator/Makefile
+@@ -160,6 +160,7 @@ obj-$(CONFIG_REGULATOR_S5M8767) += s5m8767.o
+ obj-$(CONFIG_REGULATOR_SC2731) += sc2731-regulator.o
+ obj-$(CONFIG_REGULATOR_SKY81452) += sky81452-regulator.o
+ obj-$(CONFIG_REGULATOR_SLG51000) += slg51000-regulator.o
++obj-$(CONFIG_REGULATOR_SM5703) += sm5703-regulator.o
+ obj-$(CONFIG_REGULATOR_STM32_BOOSTER) += stm32-booster.o
+ obj-$(CONFIG_REGULATOR_STM32_VREFBUF) += stm32-vrefbuf.o
+ obj-$(CONFIG_REGULATOR_STM32_PWR) += stm32-pwr.o
+diff --git a/drivers/regulator/sm5703-regulator.c b/drivers/regulator/sm5703-regulator.c
+new file mode 100644
+index 000000000..593556eed
+--- /dev/null
++++ b/drivers/regulator/sm5703-regulator.c
+@@ -0,0 +1,178 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Silicon Mitus SM5703 PMIC regulator driver.
++ *
++ * Three LDOs (1.5 V to 3.3 V), one buck (1.0 V to 3.0 V), two fixed
++ * 4.8 V USB LDOs and the 5 V VBUS boost used for USB OTG.
++ *
++ * Based on the "Add support for Silicon Mitus SM5703 MFD" series by
++ * Markuss Broks <markuss.broks@gmail.com>.
++ */
++
++#include <linux/mfd/sm5703.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++#include <linux/regulator/driver.h>
++#include <linux/regulator/of_regulator.h>
++
++enum sm5703_regulators {
++	SM5703_BUCK,
++	SM5703_LDO1,
++	SM5703_LDO2,
++	SM5703_LDO3,
++	SM5703_USBLDO1,
++	SM5703_USBLDO2,
++	SM5703_VBUS,
++	SM5703_MAX_REGULATORS,
++};
++
++static const unsigned int sm5703_ldo_voltagemap[] = {
++	1500000, 1800000, 2600000, 2800000, 3000000, 3300000, 3300000, 3300000,
++};
++
++static const unsigned int sm5703_buck_voltagemap[] = {
++	1000000, 1000000, 1000000, 1000000,
++	1000000, 1000000, 1000000, 1000000,
++	1000000, 1000000, 1000000, 1100000,
++	1200000, 1300000, 1400000, 1500000,
++	1600000, 1700000, 1800000, 1900000,
++	2000000, 2100000, 2200000, 2300000,
++	2400000, 2500000, 2600000, 2700000,
++	2800000, 2900000, 3000000, 3000000,
++};
++
++static const struct regulator_ops sm5703_regulator_ops = {
++	.enable			= regulator_enable_regmap,
++	.disable		= regulator_disable_regmap,
++	.is_enabled		= regulator_is_enabled_regmap,
++	.list_voltage		= regulator_list_voltage_table,
++	.map_voltage		= regulator_map_voltage_ascend,
++	.get_voltage_sel	= regulator_get_voltage_sel_regmap,
++	.set_voltage_sel	= regulator_set_voltage_sel_regmap,
++};
++
++static const struct regulator_ops sm5703_regulator_ops_fixed = {
++	.enable			= regulator_enable_regmap,
++	.disable		= regulator_disable_regmap,
++	.is_enabled		= regulator_is_enabled_regmap,
++};
++
++#define SM5703USBLDO(_name, _id)					\
++	[SM5703_USBLDO ## _id] = {					\
++		.name = _name,						\
++		.of_match = _name,					\
++		.regulators_node = "regulators",			\
++		.type = REGULATOR_VOLTAGE,				\
++		.id = SM5703_USBLDO ## _id,				\
++		.ops = &sm5703_regulator_ops_fixed,			\
++		.n_voltages = 1,					\
++		.fixed_uV = SM5703_USBLDO_MICROVOLT,			\
++		.enable_reg = SM5703_REG_USBLDO12,			\
++		.enable_mask = SM5703_REG_EN_USBLDO ## _id,		\
++		.owner = THIS_MODULE,					\
++	}
++
++#define SM5703VBUS(_name)						\
++	[SM5703_VBUS] = {						\
++		.name = _name,						\
++		.of_match = _name,					\
++		.regulators_node = "regulators",			\
++		.type = REGULATOR_VOLTAGE,				\
++		.id = SM5703_VBUS,					\
++		.ops = &sm5703_regulator_ops_fixed,			\
++		.n_voltages = 1,					\
++		.fixed_uV = SM5703_VBUS_MICROVOLT,			\
++		.enable_reg = SM5703_REG_CNTL,				\
++		.enable_mask = SM5703_OPERATION_MODE_MASK,		\
++		.enable_val = SM5703_OPERATION_MODE_USB_OTG_MODE,	\
++		.disable_val = SM5703_OPERATION_MODE_CHARGING_ON,	\
++		.owner = THIS_MODULE,					\
++	}
++
++#define SM5703BUCK(_name)						\
++	[SM5703_BUCK] = {						\
++		.name = _name,						\
++		.of_match = _name,					\
++		.regulators_node = "regulators",			\
++		.type = REGULATOR_VOLTAGE,				\
++		.id = SM5703_BUCK,					\
++		.ops = &sm5703_regulator_ops,				\
++		.n_voltages = ARRAY_SIZE(sm5703_buck_voltagemap),	\
++		.volt_table = sm5703_buck_voltagemap,			\
++		.vsel_reg = SM5703_REG_BUCK,				\
++		.vsel_mask = SM5703_BUCK_VOLT_MASK,			\
++		.enable_reg = SM5703_REG_BUCK,				\
++		.enable_mask = SM5703_REG_EN_BUCK,			\
++		.owner = THIS_MODULE,					\
++	}
++
++#define SM5703LDO(_name, _id)						\
++	[SM5703_LDO ## _id] = {						\
++		.name = _name,						\
++		.of_match = _name,					\
++		.regulators_node = "regulators",			\
++		.type = REGULATOR_VOLTAGE,				\
++		.id = SM5703_LDO ## _id,				\
++		.ops = &sm5703_regulator_ops,				\
++		.n_voltages = ARRAY_SIZE(sm5703_ldo_voltagemap),	\
++		.volt_table = sm5703_ldo_voltagemap,			\
++		.vsel_reg = SM5703_REG_LDO ## _id,			\
++		.vsel_mask = SM5703_LDO_VOLT_MASK,			\
++		.enable_reg = SM5703_REG_LDO ## _id,			\
++		.enable_mask = SM5703_LDO_EN,				\
++		.owner = THIS_MODULE,					\
++	}
++
++static const struct regulator_desc sm5703_regulators_desc[SM5703_MAX_REGULATORS] = {
++	SM5703BUCK("buck"),
++	SM5703LDO("ldo1", 1),
++	SM5703LDO("ldo2", 2),
++	SM5703LDO("ldo3", 3),
++	SM5703USBLDO("usbldo1", 1),
++	SM5703USBLDO("usbldo2", 2),
++	SM5703VBUS("vbus"),
++};
++
++static int sm5703_regulator_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct sm5703_dev *sm5703 = dev_get_drvdata(dev->parent);
++	struct regulator_config config = { };
++	struct regulator_dev *rdev;
++	int i;
++
++	config.dev = dev->parent;
++	config.regmap = sm5703->regmap;
++
++	for (i = 0; i < SM5703_MAX_REGULATORS; i++) {
++		rdev = devm_regulator_register(dev, &sm5703_regulators_desc[i],
++					       &config);
++		if (IS_ERR(rdev))
++			return dev_err_probe(dev, PTR_ERR(rdev),
++					     "Failed to register regulator %s\n",
++					     sm5703_regulators_desc[i].name);
++	}
++
++	return 0;
++}
++
++static const struct platform_device_id sm5703_regulator_id[] = {
++	{ "sm5703-regulator", 0 },
++	{ }
++};
++MODULE_DEVICE_TABLE(platform, sm5703_regulator_id);
++
++static struct platform_driver sm5703_regulator_driver = {
++	.driver = {
++		.name = "sm5703-regulator",
++	},
++	.probe = sm5703_regulator_probe,
++	.id_table = sm5703_regulator_id,
++};
++module_platform_driver(sm5703_regulator_driver);
++
++MODULE_DESCRIPTION("Silicon Mitus SM5703 LDO/Buck/USB regulator driver");
++MODULE_AUTHOR("Markuss Broks <markuss.broks@gmail.com>");
++MODULE_LICENSE("GPL");
+-- 
+2.56.0
+
