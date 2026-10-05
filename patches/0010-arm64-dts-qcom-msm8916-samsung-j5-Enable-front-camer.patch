@@ -1,0 +1,159 @@
+From 6c9e52cc4a835f3a279c79da13cd64a0c27ca01d Mon Sep 17 00:00:00 2001
+From: Toemmsen96 <147745097+Toemmsen96@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 19:00:02 +0200
+Subject: [PATCH 10/10] arm64: dts: qcom: msm8916-samsung-j5: Enable front
+ camera
+
+The front camera of the Galaxy J5 is a Samsung S5K5E3 at address 0x10 on
+CCI master 0, connected to CSIPHY1/CSID1 with two data lanes. Describe
+it according to the downstream msm8916-camera-sensor-cdp-j5-r00.dtsi:
+
+ - EXTCLK from CAMSS MCLK1 (GPIO 27), 26 MHz
+ - reset on GPIO 28, active low
+ - AVDD 2.8 V from SM5703 LDO1, I/O 1.8 V from PM8916 L16, and the
+   digital core supply from the SM5703 buck switched by GPIO 33
+   ("cam_core_en" downstream), modelled as a fixed regulator
+ - mount angle 270 degrees, front facing
+
+L16 has no voltage constraints in msm8916-pm8916.dtsi, so set it to the
+1.8 V the downstream kernel requests.
+
+Enable CCI and CAMSS for it.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../boot/dts/qcom/msm8916-samsung-j5.dts      | 97 +++++++++++++++++++
+ 1 file changed, 97 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts b/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts
+index 486d10f08..b378a3fde 100644
+--- a/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts
++++ b/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts
+@@ -91,6 +91,22 @@ touchkey@20 {
+ 		};
+ 	};
+ 
++	/* GPIO 33 switches the SM5703 buck to the camera core supply */
++	reg_cam_core: regulator-cam-core {
++		compatible = "regulator-fixed";
++		regulator-name = "cam_core";
++		regulator-min-microvolt = <1500000>;
++		regulator-max-microvolt = <1500000>;
++
++		vin-supply = <&reg_cam_sensor_core>;
++
++		gpio = <&tlmm 33 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++
++		pinctrl-0 = <&cam_core_en_default>;
++		pinctrl-names = "default";
++	};
++
+ 	/* GPIO 73 gates the proximity sensor supply derived from L17 */
+ 	reg_prox_vdd: regulator-prox-vdd {
+ 		compatible = "regulator-fixed";
+@@ -175,6 +191,56 @@ reg_usbldo2: usbldo2 {
+ 	};
+ };
+ 
++&camss {
++	status = "okay";
++
++	ports {
++		port@1 {
++			reg = <1>;
++
++			csiphy1_ep: endpoint {
++				data-lanes = <0 2>;
++				remote-endpoint = <&front_camera_ep>;
++			};
++		};
++	};
++};
++
++&cci {
++	status = "okay";
++};
++
++&cci_i2c0 {
++	front_camera: camera@10 {
++		compatible = "samsung,s5k5e3";
++		reg = <0x10>;
++
++		clocks = <&gcc GCC_CAMSS_MCLK1_CLK>;
++		assigned-clocks = <&gcc GCC_CAMSS_MCLK1_CLK>;
++		assigned-clock-rates = <26000000>;
++
++		vana-supply = <&reg_cam_sensor_a2p8>;
++		vdig-supply = <&reg_cam_core>;
++		vio-supply = <&pm8916_l16>;
++
++		reset-gpios = <&tlmm 28 GPIO_ACTIVE_LOW>;
++
++		orientation = <0>;
++		rotation = <270>;
++
++		pinctrl-0 = <&cam_front_mclk_default &cam_front_reset_default>;
++		pinctrl-names = "default";
++
++		port {
++			front_camera_ep: endpoint {
++				data-lanes = <1 2>;
++				link-frequencies = /bits/ 64 <448500000>;
++				remote-endpoint = <&csiphy1_ep>;
++			};
++		};
++	};
++};
++
+ &i2c_sensors {
+ 	proximity@44 {
+ 		compatible = "sharp,gp2ap002s00f";
+@@ -206,6 +272,13 @@ &pm8916_codec {
+ 	qcom,micbias1-ext-cap;
+ };
+ 
++&pm8916_rpm_regulators {
++	pm8916_l16: l16 {
++		regulator-min-microvolt = <1800000>;
++		regulator-max-microvolt = <1800000>;
++	};
++};
++
+ &reg_vdd_lcd_1p8 {
+ 	gpio = <&tlmm 16 GPIO_ACTIVE_HIGH>;
+ };
+@@ -227,6 +300,30 @@ &vtcam_flash_en_default {
+ };
+ 
+ &tlmm {
++	cam_core_en_default: cam-core-en-default-state {
++		pins = "gpio33";
++		function = "gpio";
++
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	cam_front_mclk_default: cam-front-mclk-default-state {
++		pins = "gpio27";
++		function = "cam_mclk1";
++
++		drive-strength = <16>;
++		bias-disable;
++	};
++
++	cam_front_reset_default: cam-front-reset-default-state {
++		pins = "gpio28";
++		function = "gpio";
++
++		drive-strength = <2>;
++		bias-disable;
++	};
++
+ 	fg_i2c_default: fg-i2c-default-state {
+ 		pins = "gpio14", "gpio15";
+ 		function = "gpio";
+-- 
+2.56.0
+
