@@ -87,13 +87,16 @@ sudo reboot
   tables, reset polarity, bus wiring, regulator constraints): no issues.
 - Tested on an SM-J500F running postmarketOS v26.06 (GNOME Mobile): the
   touchscreen works.
-- Patch 4 and 5 on hardware: the touch keys work (press and release for
-  both keys, verified with `evtest`; postmarketOS's udev hwdb remaps the
-  left key from KEY_APPSELECT to KEY_MENU, which is expected). The
-  vibrator and proximity sensor probe; their function still needs a
-  manual check: trigger `fbcli -E message-new-instant` for the motor,
-  and for proximity enable `in_proximity_thresh_either_en` under the
-  gp2ap002 IIO device and watch the event fd (or `iio_event_monitor`).
+- Patches 4 and 5 on hardware: touch keys (press and release for both
+  keys; postmarketOS's udev hwdb remaps the left key from KEY_APPSELECT
+  to KEY_MENU, which is expected), vibrator (feedbackd haptic events) and
+  proximity sensor (NEAR/FAR IIO events) all work. The proximity sensor
+  only works because GPIO 73 is driven as its power enable; without it
+  the sensor never raises an interrupt, which matches the old wiki note.
+- Still open on the wiki's list: camera (no mainline support for these
+  sensors), battery (SM5703 fuel gauge at a separate I2C address, no
+  mainline driver), USB OTG (needs the SM5703 VBUS boost), accelerometer
+  mount matrix (needs testing by rotating the phone).
 
 ## Note on flashing
 
