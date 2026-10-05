@@ -84,6 +84,15 @@ ssh 172.16.42.1 # This is the address of the phone over USB
 sudo reboot
 ```
 
+## GNOME: make the Menu touch key open the app grid
+
+postmarketOS's udev hwdb maps the left touch key to KEY_MENU, which GNOME
+ignores by default. On the phone, as your user:
+
+```sh
+gsettings set org.gnome.shell.keybindings toggle-application-view "['<Super>a', 'Menu']"
+```
+
 ## Status
 
 - Drivers compile with clang for arm64 against the postmarketOS msm8916
