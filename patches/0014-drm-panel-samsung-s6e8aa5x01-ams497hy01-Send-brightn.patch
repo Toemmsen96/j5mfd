@@ -1,0 +1,48 @@
+From 0f7a5e37eaac287a85c585346fd24c67501daa6b Mon Sep 17 00:00:00 2001
+From: Toemmsen96 <147745097+Toemmsen96@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 20:15:23 +0200
+Subject: [PATCH] drm/panel: samsung-s6e8aa5x01-ams497hy01: Send brightness
+ updates in LP mode
+
+Brightness updates were sent as HS command transfers while the video
+stream is running, which makes the msm DSI host log "dsi_err_worker:
+status=4" (FIFO error) on every slider change. Send them in LP mode like
+the init sequence; the panel accepts the commands either way.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../panel-samsung-s6e8aa5x01-ams497hy01.c              | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/panel/msm8916-generated/panel-samsung-s6e8aa5x01-ams497hy01.c b/drivers/gpu/drm/panel/msm8916-generated/panel-samsung-s6e8aa5x01-ams497hy01.c
+index 6f445f3bc..999ff8155 100644
+--- a/drivers/gpu/drm/panel/msm8916-generated/panel-samsung-s6e8aa5x01-ams497hy01.c
++++ b/drivers/gpu/drm/panel/msm8916-generated/panel-samsung-s6e8aa5x01-ams497hy01.c
+@@ -1011,7 +1011,6 @@ static const struct drm_panel_funcs s6e8aa5x01_ams497hy01_panel_funcs = {
+ static int s6e8aa5x01_ams497hy01_bl_update_status(struct backlight_device *bl)
+ {
+ 	struct s6e8aa5x01_ams497hy01 *ctx = bl_get_data(bl);
+-	struct mipi_dsi_device *dsi = ctx->dsi;
+ 	int ret = 0;
+ 
+ 	mutex_lock(&ctx->lock);
+@@ -1021,11 +1020,12 @@ static int s6e8aa5x01_ams497hy01_bl_update_status(struct backlight_device *bl)
+ 	 * backlight keeps the last level. The requested level is applied when
+ 	 * the panel is (re-)initialised.
+ 	 */
+-	if (ctx->prepared && !backlight_is_blank(bl)) {
+-		dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
++	/*
++	 * Send brightness updates in LP mode: HS command transfers while the
++	 * video stream is running trigger DSI FIFO errors on this host.
++	 */
++	if (ctx->prepared && !backlight_is_blank(bl))
+ 		ret = s6e8aa5x01_set_brightness(ctx, bl->props.brightness);
+-		dsi->mode_flags |= MIPI_DSI_MODE_LPM;
+-	}
+ 
+ 	mutex_unlock(&ctx->lock);
+ 
+-- 
+2.56.0
+

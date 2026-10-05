@@ -54,6 +54,7 @@ Hardware facts come from the downstream Samsung kernel for j5lte
 | `patches/0011-power-supply-Add-SM5703-charger-status-driver.patch` | Read-only SM5703 charger power supply (VBUS present, charging/full state, configured currents), polled every 5 s |
 | `patches/0012-power-supply-sm5703-fuel-gauge-Derive-status-from-th*.patch` | Fuel gauge takes Charging/Discharging from the charger instead of the near-zero battery current |
 | `patches/0013-drm-panel-samsung-s6e8aa5x01-ams497hy01-Add-brightne*.patch` | Brightness control for the AMOLED panel: backlight device, Samsung smart-dimming gamma from the panel's MTP data, AID/ELVSS/ACL per level (62 steps, 5 to 360 cd) |
+| `patches/0014-drm-panel-samsung-s6e8aa5x01-ams497hy01-Send-brightn*.patch` | Brightness updates in DSI low-power mode (avoids DSI FIFO errors on every slider change) |
 | `kernel/` | The new source files as plain files, for reading or reuse |
 | `pmaports/apply.sh` | Installs the patches and kernel config options into pmaports |
 | `pmaports/kconfig.fragment` | `CONFIG_MFD_SM5703=m`, `CONFIG_REGULATOR_SM5703=m`, `CONFIG_GP2AP002=m`, `CONFIG_BATTERY_SM5703=m`, `CONFIG_VIDEO_S5K5E3=m`, `CONFIG_CHARGER_SM5703=m` |
@@ -143,8 +144,14 @@ gsettings set org.gnome.shell.keybindings toggle-application-view "['<Super>a', 
   Before them the phone exposed no power_supply device at all. The driver
   programs the Samsung battery tables only when the chip has lost them
   (removable battery pulled); on this phone they were still present.
-- Patch 13 (brightness): compile-tested, not yet run on hardware. Before it
-  there is no backlight device at all, which is the wiki's "screen partial".
+- Patch 13 (brightness) on hardware: the backlight device appears, the
+  panel reports revision C, smart dimming is active and the slider works.
+  Patch 14 moves the updates to LP mode after DSI FIFO errors were seen on
+  slider changes (compile-tested).
+- Known pre-existing display issue, not caused by these patches: coloured
+  speckle on light grey areas, mostly on the right side of the screen.
+  Panel init, porches, lanes and flags match the vendor configuration;
+  still under investigation (DSI link vs. GPU rendering).
 - Patches 11 and 12 (charger status): compile-tested, not yet run on
   hardware. On a PC USB port the battery current hovers around zero, so
   without them the status flips between Charging and Discharging every few
