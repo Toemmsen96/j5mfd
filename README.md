@@ -56,6 +56,7 @@ Hardware facts come from the downstream Samsung kernel for j5lte
 | `patches/0013-drm-panel-samsung-s6e8aa5x01-ams497hy01-Add-brightne*.patch` | Brightness control for the AMOLED panel: backlight device, Samsung smart-dimming gamma from the panel's MTP data, AID/ELVSS/ACL per level (62 steps, 5 to 360 cd) |
 | `patches/0014-drm-panel-samsung-s6e8aa5x01-ams497hy01-Send-brightn*.patch` | Brightness updates in DSI low-power mode (avoids DSI FIFO errors on every slider change) |
 | `patches/0015-arm64-dts-qcom-msm8916-samsung-j5-Vote-display-memory*.patch` | Display memory bandwidth vote (mdp0-mem interconnect) against MDP underflows; needs the msm8916 interconnect driver enabled |
+| `patches/0016-drm-msm-dsi-28nm-lp-PHY-Use-the-MSM8916-vendor-regul*.patch` | DSI PHY regulator programmed with the msm8916 vendor values instead of the generic msm8974 ones (candidate fix for the grey-noise display artefact) |
 | `kernel/` | The new source files as plain files, for reading or reuse |
 | `pmaports/apply.sh` | Installs the patches and kernel config options into pmaports |
 | `pmaports/kconfig.fragment` | `CONFIG_MFD_SM5703=m`, `CONFIG_REGULATOR_SM5703=m`, `CONFIG_GP2AP002=m`, `CONFIG_BATTERY_SM5703=m`, `CONFIG_VIDEO_S5K5E3=m`, `CONFIG_CHARGER_SM5703=m`, `CONFIG_INTERCONNECT_QCOM=y`, `CONFIG_INTERCONNECT_QCOM_MSM8916=y` |
@@ -154,8 +155,11 @@ gsettings set org.gnome.shell.keybindings toggle-application-view "['<Super>a', 
   Screenshots are clean and it gets worse while scrolling, so the frame is
   corrupted between the display controller and the panel. The kernel logs
   "No interconnect support may cause display underflows!" and DSI FIFO
-  errors; patch 15 enables the interconnect driver and votes display
-  bandwidth to address this (being tested).
+  errors. Patch 14 removed the DSI errors and patch 15 (display bandwidth
+  vote) made no difference, so it is not an underflow. Comparing the DSI
+  PHY setup with the vendor kernel found the PHY regulator block
+  programmed with msm8974 values; patch 16 switches the msm8916 PHY to the
+  vendor settings (being tested).
 - Patches 11 and 12 (charger status): compile-tested, not yet run on
   hardware. On a PC USB port the battery current hovers around zero, so
   without them the status flips between Charging and Discharging every few
