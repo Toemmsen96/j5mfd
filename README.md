@@ -95,10 +95,12 @@ sudo reboot
   proximity sensor (NEAR/FAR IIO events) all work. The proximity sensor
   only works because GPIO 73 is driven as its power enable; without it
   the sensor never raises an interrupt, which matches the old wiki note.
-- Patches 6 and 7 (battery): compile-tested, not yet run on hardware. Before
-  them the phone exposes no power_supply device at all. The driver reports
-  the gauge's own state of charge and programs the Samsung battery tables
-  only when the chip has lost them (removable battery pulled).
+- Patches 6 and 7 (battery) on hardware: the gauge probes at 0x71 and the
+  phone now has a `sm5703-fuel-gauge` power supply with percentage,
+  voltage, current and chip temperature; GNOME shows the battery level.
+  Before them the phone exposed no power_supply device at all. The driver
+  programs the Samsung battery tables only when the chip has lost them
+  (removable battery pulled); on this phone they were still present.
 - Still open on the wiki's list: camera (no mainline support for these
   sensors), battery (SM5703 fuel gauge at a separate I2C address, no
   mainline driver, now addressed by patches 6/7), USB OTG (needs the SM5703 VBUS boost), accelerometer
