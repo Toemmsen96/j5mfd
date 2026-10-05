@@ -55,9 +55,10 @@ Hardware facts come from the downstream Samsung kernel for j5lte
 | `patches/0012-power-supply-sm5703-fuel-gauge-Derive-status-from-th*.patch` | Fuel gauge takes Charging/Discharging from the charger instead of the near-zero battery current |
 | `patches/0013-drm-panel-samsung-s6e8aa5x01-ams497hy01-Add-brightne*.patch` | Brightness control for the AMOLED panel: backlight device, Samsung smart-dimming gamma from the panel's MTP data, AID/ELVSS/ACL per level (62 steps, 5 to 360 cd) |
 | `patches/0014-drm-panel-samsung-s6e8aa5x01-ams497hy01-Send-brightn*.patch` | Brightness updates in DSI low-power mode (avoids DSI FIFO errors on every slider change) |
+| `patches/0015-arm64-dts-qcom-msm8916-samsung-j5-Vote-display-memory*.patch` | Display memory bandwidth vote (mdp0-mem interconnect) against MDP underflows; needs the msm8916 interconnect driver enabled |
 | `kernel/` | The new source files as plain files, for reading or reuse |
 | `pmaports/apply.sh` | Installs the patches and kernel config options into pmaports |
-| `pmaports/kconfig.fragment` | `CONFIG_MFD_SM5703=m`, `CONFIG_REGULATOR_SM5703=m`, `CONFIG_GP2AP002=m`, `CONFIG_BATTERY_SM5703=m`, `CONFIG_VIDEO_S5K5E3=m`, `CONFIG_CHARGER_SM5703=m` |
+| `pmaports/kconfig.fragment` | `CONFIG_MFD_SM5703=m`, `CONFIG_REGULATOR_SM5703=m`, `CONFIG_GP2AP002=m`, `CONFIG_BATTERY_SM5703=m`, `CONFIG_VIDEO_S5K5E3=m`, `CONFIG_CHARGER_SM5703=m`, `CONFIG_INTERCONNECT_QCOM=y`, `CONFIG_INTERCONNECT_QCOM_MSM8916=y` |
 
 Patch provenance: the SM5703 PMIC and regulator drivers are the v5
 submission by Markuss Broks from April 2022 ("Add support for Silicon
@@ -150,8 +151,11 @@ gsettings set org.gnome.shell.keybindings toggle-application-view "['<Super>a', 
   slider changes (compile-tested).
 - Known pre-existing display issue, not caused by these patches: coloured
   speckle on light grey areas, mostly on the right side of the screen.
-  Panel init, porches, lanes and flags match the vendor configuration;
-  still under investigation (DSI link vs. GPU rendering).
+  Screenshots are clean and it gets worse while scrolling, so the frame is
+  corrupted between the display controller and the panel. The kernel logs
+  "No interconnect support may cause display underflows!" and DSI FIFO
+  errors; patch 15 enables the interconnect driver and votes display
+  bandwidth to address this (being tested).
 - Patches 11 and 12 (charger status): compile-tested, not yet run on
   hardware. On a PC USB port the battery current hovers around zero, so
   without them the status flips between Charging and Discharging every few

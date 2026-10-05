@@ -1,0 +1,51 @@
+From 98f004dd19119660592afcf0f614dad475696ca6 Mon Sep 17 00:00:00 2001
+From: Toemmsen96 <147745097+Toemmsen96@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 20:22:26 +0200
+Subject: [PATCH] arm64: dts: qcom: msm8916-samsung-j5: Vote display memory
+ bandwidth
+
+Add the mdp0-mem interconnect path to the display controller so the MDP
+driver votes memory bandwidth (and the msm8916 interconnect driver
+programs the NoC QoS). Without it mdp5 warns "No interconnect support
+may cause display underflows!", and the J5's panel shows coloured noise
+on light areas near the right edge whenever the GPU is busy (scrolling,
+moving windows), with DSI FIFO errors in the log. Requires
+CONFIG_INTERCONNECT_QCOM_MSM8916.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts b/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts
+index 486d10f08..8bdc5bd99 100644
+--- a/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts
++++ b/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts
+@@ -3,6 +3,7 @@
+ /dts-v1/;
+ 
+ #include "msm8916-samsung-j5-common.dtsi"
++#include <dt-bindings/interconnect/qcom,msm8916.h>
+ 
+ / {
+ 	model = "Samsung Galaxy J5 (2015)";
+@@ -202,6 +203,16 @@ &panel {
+ 	vci-supply = <&pm8916_l17>;
+ };
+ 
++&mdss_mdp {
++	/*
++	 * Vote memory bandwidth for the display path. Without it the MDP
++	 * starves whenever the GPU is busy, which shows as coloured noise
++	 * on light areas towards the right edge of the screen.
++	 */
++	interconnects = <&snoc MASTER_MDP_PORT0 &bimc SLAVE_EBI_CH0>;
++	interconnect-names = "mdp0-mem";
++};
++
+ &pm8916_codec {
+ 	qcom,micbias1-ext-cap;
+ };
+-- 
+2.56.0
+
