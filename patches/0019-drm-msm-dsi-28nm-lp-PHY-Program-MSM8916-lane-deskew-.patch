@@ -1,0 +1,61 @@
+From 0f6249ed96ac15a421f6f05a152d98bc9b0ba176 Mon Sep 17 00:00:00 2001
+From: Toemmsen96 <147745097+Toemmsen96@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 21:45:19 +0200
+Subject: [PATCH] drm/msm/dsi: 28nm-lp PHY: Program MSM8916 lane deskew and
+ BIST control
+
+The MSM8916 vendor kernel configures the DSI data lanes with a per-lane
+value in LN_CFG_4 (0x00, 0x05, 0x0a, 0x0f for lanes 0-3; from
+qcom,platform-lane-config in msm8916-mdss.dtsi) and writes the PHY BIST
+control block with [00 00 b1 ff 00 00]. Mainline zeroes LN_CFG_4 on all
+lanes and leaves BIST control at reset defaults. The CFG_4 values deskew
+the data lanes against the clock; without them the Galaxy J5 (2015) AMOLED
+shows pattern-dependent coloured noise in light areas. Apply the vendor
+values for the 28nm LP PHY (MSM8916).
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/msm/dsi/phy/dsi_phy_28nm.c | 20 +++++++++++++++++++-
+ 1 file changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_28nm.c b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_28nm.c
+index 0b3ae8cb9..8a95424b8 100644
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_28nm.c
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_28nm.c
+@@ -874,7 +874,15 @@ static int dsi_28nm_phy_enable(struct msm_dsi_phy *phy,
+ 		writel(0, base + REG_DSI_28nm_PHY_LN_CFG_1(i));
+ 		writel(0, base + REG_DSI_28nm_PHY_LN_CFG_2(i));
+ 		writel(0, base + REG_DSI_28nm_PHY_LN_CFG_3(i));
+-		writel(0, base + REG_DSI_28nm_PHY_LN_CFG_4(i));
++		/*
++		 * MSM8916 vendor lane configuration programs a per-lane
++		 * deskew value in CFG_4 (qcom,platform-lane-config:
++		 * 0x00, 0x05, 0x0a, 0x0f for data lanes 0-3).
++		 */
++		if (phy->cfg->quirks & DSI_PHY_28NM_QUIRK_PHY_LP)
++			writel(0x5 * i, base + REG_DSI_28nm_PHY_LN_CFG_4(i));
++		else
++			writel(0, base + REG_DSI_28nm_PHY_LN_CFG_4(i));
+ 		writel(0, base + REG_DSI_28nm_PHY_LN_TEST_DATAPATH(i));
+ 		writel(0, base + REG_DSI_28nm_PHY_LN_DEBUG_SEL(i));
+ 		writel(0x1, base + REG_DSI_28nm_PHY_LN_TEST_STR_0(i));
+@@ -888,6 +896,16 @@ static int dsi_28nm_phy_enable(struct msm_dsi_phy *phy,
+ 
+ 	writel(0x5f, base + REG_DSI_28nm_PHY_CTRL_0);
+ 
++	if (phy->cfg->quirks & DSI_PHY_28NM_QUIRK_PHY_LP) {
++		/* MSM8916 vendor qcom,platform-bist-ctrl = [00 00 b1 ff 00 00] */
++		writel(0x00, base + REG_DSI_28nm_PHY_BIST_CTRL_0);
++		writel(0x00, base + REG_DSI_28nm_PHY_BIST_CTRL_1);
++		writel(0xb1, base + REG_DSI_28nm_PHY_BIST_CTRL_2);
++		writel(0xff, base + REG_DSI_28nm_PHY_BIST_CTRL_3);
++		writel(0x00, base + REG_DSI_28nm_PHY_BIST_CTRL_4);
++		writel(0x00, base + REG_DSI_28nm_PHY_BIST_CTRL_5);
++	}
++
+ 	val = readl(base + REG_DSI_28nm_PHY_GLBL_TEST_CTRL);
+ 	if (phy->id == DSI_1 && phy->usecase == MSM_DSI_PHY_SLAVE)
+ 		val &= ~DSI_28nm_PHY_GLBL_TEST_CTRL_BITCLK_HS_SEL;
+-- 
+2.56.0
+
