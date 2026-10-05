@@ -1,0 +1,59 @@
+From cac9c51994d7fc7fc916e7d791d2466668313fc1 Mon Sep 17 00:00:00 2001
+From: Toemmsen96 <147745097+Toemmsen96@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 21:25:56 +0200
+Subject: [PATCH] drm/msm/dsi: 28nm-lp PHY: Use vendor D-PHY timings at 500
+ Mbit/s (test)
+
+Experiment for the Galaxy J5 (2015) display noise: at this panel's bit
+rate, replace the computed D-PHY timings with the values the vendor
+kernel ships for the panel. The computed values differ by a few units
+(clk_zero 148 vs 140, clk_trail 32 vs 30, hs_prepare 26 vs 24, hs_zero
+72 vs 74, hs_exit 70 vs 68, clk_pre 29 vs 28, clk_post 3 vs 4). Not
+meant for upstream in this form; if it helps, the timings should come
+from the device tree.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/msm/dsi/phy/dsi_phy_28nm.c | 26 ++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_28nm.c b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_28nm.c
+index 7e6dd465b..0b3ae8cb9 100644
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_28nm.c
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_28nm.c
+@@ -832,6 +832,32 @@ static int dsi_28nm_phy_enable(struct msm_dsi_phy *phy,
+ 		return -EINVAL;
+ 	}
+ 
++	/*
++	 * Samsung Galaxy J5 (2015) panel at 500.4 Mbit/s per lane: use the
++	 * PHY timings the vendor kernel ships for this panel
++	 * (qcom,mdss-dsi-panel-timings = [8C 1E 14 00 44 4A 18 22 18 03 04 00],
++	 * t-clk-pre 0x1C, t-clk-post 0x04) instead of the computed ones.
++	 */
++	if ((phy->cfg->quirks & DSI_PHY_28NM_QUIRK_PHY_LP) &&
++	    clk_req->bitclk_rate > 495000000 &&
++	    clk_req->bitclk_rate < 506000000) {
++		timing->clk_zero = 0x8c;
++		timing->clk_trail = 0x1e;
++		timing->clk_prepare = 0x14;
++		timing->hs_exit = 0x44;
++		timing->hs_zero = 0x4a;
++		timing->hs_prepare = 0x18;
++		timing->hs_trail = 0x22;
++		timing->hs_rqst = 0x18;
++		timing->ta_go = 3;
++		timing->ta_sure = 0;
++		timing->ta_get = 4;
++		timing->shared_timings.clk_pre = 0x1c;
++		timing->shared_timings.clk_post = 0x04;
++		timing->shared_timings.clk_pre_inc_by_2 = false;
++		DRM_DEV_INFO(&phy->pdev->dev, "using vendor D-PHY timings\n");
++	}
++
+ 	writel(0xff, base + REG_DSI_28nm_PHY_STRENGTH_0);
+ 
+ 	dsi_28nm_phy_regulator_ctrl(phy, true);
+-- 
+2.56.0
+
