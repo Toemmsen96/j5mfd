@@ -1,4 +1,4 @@
-From f82e1b2e054696fae7df71a494693c8648944c42 Mon Sep 17 00:00:00 2001
+From 1b285a84f9cfbe38f3bc6bc5065d60a9ddbab2bd Mon Sep 17 00:00:00 2001
 From: Markuss Broks <markuss.broks@gmail.com>
 Date: Mon, 5 Oct 2026 16:52:24 +0200
 Subject: [PATCH 1/3] mfd: sm5703: Add support for the Silicon Mitus SM5703
@@ -25,9 +25,9 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
  .../bindings/mfd/siliconmitus,sm5703.yaml     |  73 +++++++++++++
  drivers/mfd/Kconfig                           |  13 +++
  drivers/mfd/Makefile                          |   1 +
- drivers/mfd/sm5703.c                          | 103 ++++++++++++++++++
- include/linux/mfd/sm5703.h                    |  87 +++++++++++++++
- 5 files changed, 277 insertions(+)
+ drivers/mfd/sm5703.c                          | 101 ++++++++++++++++++
+ include/linux/mfd/sm5703.h                    |  86 +++++++++++++++
+ 5 files changed, 274 insertions(+)
  create mode 100644 Documentation/devicetree/bindings/mfd/siliconmitus,sm5703.yaml
  create mode 100644 drivers/mfd/sm5703.c
  create mode 100644 include/linux/mfd/sm5703.h
@@ -149,10 +149,10 @@ index 2a9f91e81..976d4b433 100644
  obj-$(CONFIG_MFD_BD9571MWV)	+= bd9571mwv.o
 diff --git a/drivers/mfd/sm5703.c b/drivers/mfd/sm5703.c
 new file mode 100644
-index 000000000..e1fb90042
+index 000000000..3154685b1
 --- /dev/null
 +++ b/drivers/mfd/sm5703.c
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,101 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Silicon Mitus SM5703 PMIC core driver.
@@ -167,7 +167,6 @@ index 000000000..e1fb90042
 + * Markuss Broks <markuss.broks@gmail.com>.
 + */
 +
-+#include <linux/delay.h>
 +#include <linux/err.h>
 +#include <linux/gpio/consumer.h>
 +#include <linux/i2c.h>
@@ -184,6 +183,7 @@ index 000000000..e1fb90042
 +static const struct regmap_config sm5703_regmap_config = {
 +	.reg_bits	= 8,
 +	.val_bits	= 8,
++	.max_register	= SM5703_REG_STATUS5,
 +};
 +
 +static int sm5703_i2c_probe(struct i2c_client *i2c)
@@ -214,8 +214,6 @@ index 000000000..e1fb90042
 +	if (IS_ERR(sm5703->reset_gpio))
 +		return dev_err_probe(dev, PTR_ERR(sm5703->reset_gpio),
 +				     "Cannot get reset GPIO\n");
-+	if (sm5703->reset_gpio)
-+		msleep(20);
 +
 +	ret = regmap_read(sm5703->regmap, SM5703_REG_DEVICE_ID, &dev_id);
 +	if (ret)
@@ -258,10 +256,10 @@ index 000000000..e1fb90042
 +MODULE_LICENSE("GPL");
 diff --git a/include/linux/mfd/sm5703.h b/include/linux/mfd/sm5703.h
 new file mode 100644
-index 000000000..61806df88
+index 000000000..0a19302f6
 --- /dev/null
 +++ b/include/linux/mfd/sm5703.h
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,86 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/*
 + * Silicon Mitus SM5703 PMIC register definitions.
@@ -344,7 +342,6 @@ index 000000000..61806df88
 +#define SM5703_BUCK_VOLT_MASK			GENMASK(4, 0)
 +
 +#define SM5703_USBLDO_MICROVOLT			4800000
-+#define SM5703_VBUS_MICROVOLT			5000000
 +
 +#define SM5703_REG_DEVICE_ID			0x1E
 +

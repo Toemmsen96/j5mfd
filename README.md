@@ -15,7 +15,7 @@ them into a pmbootstrap checkout so the stock postmarketOS kernel package
 | Path | What |
 | --- | --- |
 | `patches/0001-mfd-sm5703-*.patch` | SM5703 PMIC core driver, register header, device-tree binding |
-| `patches/0002-regulator-sm5703-*.patch` | Regulator driver: 3 LDOs, buck, 2 USB LDOs, VBUS |
+| `patches/0002-regulator-sm5703-*.patch` | Regulator driver: 3 LDOs, buck, 2 USB LDOs |
 | `patches/0003-arm64-dts-qcom-msm8916-samsung-j5-*.patch` | J5 device tree: PMIC on BLSP I2C6, LDO3 feeds the touchscreen, touchscreen bus enabled |
 | `kernel/` | The new source files as plain files, for reading or reuse |
 | `pmaports/apply.sh` | Installs the patches and kernel config options into pmaports |
@@ -69,4 +69,6 @@ evtest                                           # pick the IST3038C device, tou
   config (see below for how this was tested).
 - Device tree blob builds; the PMIC and touchscreen nodes are present and
   the touchscreen bus is enabled.
+- Reviewed against the downstream Samsung sources (register map, voltage
+  tables, reset polarity, bus wiring, regulator constraints): no issues.
 - Not yet tested on hardware: the phone needs reflashing first.

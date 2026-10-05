@@ -2,8 +2,9 @@
 /*
  * Silicon Mitus SM5703 PMIC regulator driver.
  *
- * Three LDOs (1.5 V to 3.3 V), one buck (1.0 V to 3.0 V), two fixed
- * 4.8 V USB LDOs and the 5 V VBUS boost used for USB OTG.
+ * Three LDOs (1.5 V to 3.3 V), one buck (1.0 V to 3.0 V) and two fixed
+ * 4.8 V USB LDOs. The 5 V VBUS boost for USB OTG shares the operation
+ * mode bits with the charger and is left to a future charger driver.
  *
  * Based on the "Add support for Silicon Mitus SM5703 MFD" series by
  * Markuss Broks <markuss.broks@gmail.com>.
@@ -24,7 +25,6 @@ enum sm5703_regulators {
 	SM5703_LDO3,
 	SM5703_USBLDO1,
 	SM5703_USBLDO2,
-	SM5703_VBUS,
 	SM5703_MAX_REGULATORS,
 };
 
@@ -74,23 +74,6 @@ static const struct regulator_ops sm5703_regulator_ops_fixed = {
 		.owner = THIS_MODULE,					\
 	}
 
-#define SM5703VBUS(_name)						\
-	[SM5703_VBUS] = {						\
-		.name = _name,						\
-		.of_match = _name,					\
-		.regulators_node = "regulators",			\
-		.type = REGULATOR_VOLTAGE,				\
-		.id = SM5703_VBUS,					\
-		.ops = &sm5703_regulator_ops_fixed,			\
-		.n_voltages = 1,					\
-		.fixed_uV = SM5703_VBUS_MICROVOLT,			\
-		.enable_reg = SM5703_REG_CNTL,				\
-		.enable_mask = SM5703_OPERATION_MODE_MASK,		\
-		.enable_val = SM5703_OPERATION_MODE_USB_OTG_MODE,	\
-		.disable_val = SM5703_OPERATION_MODE_CHARGING_ON,	\
-		.owner = THIS_MODULE,					\
-	}
-
 #define SM5703BUCK(_name)						\
 	[SM5703_BUCK] = {						\
 		.name = _name,						\
@@ -132,7 +115,6 @@ static const struct regulator_desc sm5703_regulators_desc[SM5703_MAX_REGULATORS]
 	SM5703LDO("ldo3", 3),
 	SM5703USBLDO("usbldo1", 1),
 	SM5703USBLDO("usbldo2", 2),
-	SM5703VBUS("vbus"),
 };
 
 static int sm5703_regulator_probe(struct platform_device *pdev)

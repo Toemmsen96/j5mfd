@@ -12,7 +12,6 @@
  * Markuss Broks <markuss.broks@gmail.com>.
  */
 
-#include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
@@ -29,6 +28,7 @@ static const struct mfd_cell sm5703_devs[] = {
 static const struct regmap_config sm5703_regmap_config = {
 	.reg_bits	= 8,
 	.val_bits	= 8,
+	.max_register	= SM5703_REG_STATUS5,
 };
 
 static int sm5703_i2c_probe(struct i2c_client *i2c)
@@ -59,8 +59,6 @@ static int sm5703_i2c_probe(struct i2c_client *i2c)
 	if (IS_ERR(sm5703->reset_gpio))
 		return dev_err_probe(dev, PTR_ERR(sm5703->reset_gpio),
 				     "Cannot get reset GPIO\n");
-	if (sm5703->reset_gpio)
-		msleep(20);
 
 	ret = regmap_read(sm5703->regmap, SM5703_REG_DEVICE_ID, &dev_id);
 	if (ret)

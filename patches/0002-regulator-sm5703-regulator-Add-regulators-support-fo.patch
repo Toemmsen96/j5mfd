@@ -1,12 +1,13 @@
-From b27dab298a33879a5ed38a695d7affd2fa8a1737 Mon Sep 17 00:00:00 2001
+From e4de24a9d7f40fdc9061e89449bc8113612f4830 Mon Sep 17 00:00:00 2001
 From: Markuss Broks <markuss.broks@gmail.com>
 Date: Mon, 5 Oct 2026 16:52:25 +0200
 Subject: [PATCH 2/3] regulator: sm5703-regulator: Add regulators support for
  the SM5703 PMIC
 
 The regulator block of the SM5703 controls three LDOs (1.5 V to 3.3 V),
-one buck (1.0 V to 3.0 V), two fixed 4.8 V USB LDOs and the 5 V VBUS
-boost used for USB OTG.
+one buck (1.0 V to 3.0 V) and two fixed 4.8 V USB LDOs. The 5 V VBUS
+boost shares its mode bits with the charger and is left out until a
+charger driver exists.
 
 This is the v5 submission from April 2022 [1]. The LDO voltage table
 lists all eight selector values (the top three all map to 3.3 V) so the
@@ -16,17 +17,17 @@ regmap helpers never see a selector outside the table.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 ---
- drivers/regulator/Kconfig            |   8 ++
+ drivers/regulator/Kconfig            |   7 ++
  drivers/regulator/Makefile           |   1 +
- drivers/regulator/sm5703-regulator.c | 178 +++++++++++++++++++++++++++
- 3 files changed, 187 insertions(+)
+ drivers/regulator/sm5703-regulator.c | 160 +++++++++++++++++++++++++++
+ 3 files changed, 168 insertions(+)
  create mode 100644 drivers/regulator/sm5703-regulator.c
 
 diff --git a/drivers/regulator/Kconfig b/drivers/regulator/Kconfig
-index 39297f7d8..7f07d5f1b 100644
+index 39297f7d8..cd928e2fc 100644
 --- a/drivers/regulator/Kconfig
 +++ b/drivers/regulator/Kconfig
-@@ -1373,6 +1373,14 @@ config REGULATOR_SLG51000
+@@ -1373,6 +1373,13 @@ config REGULATOR_SLG51000
  	  The SLG51000 is seven compact and customizable low dropout
  	  regulators.
  
@@ -35,8 +36,7 @@ index 39297f7d8..7f07d5f1b 100644
 +	depends on MFD_SM5703
 +	help
 +	  This driver provides support for the voltage regulators of the
-+	  Silicon Mitus SM5703 PMIC: three LDOs, one buck, two USB LDOs
-+	  and the VBUS boost output.
++	  Silicon Mitus SM5703 PMIC: three LDOs, one buck and two USB LDOs.
 +
  config REGULATOR_STM32_BOOSTER
  	tristate "STMicroelectronics STM32 BOOSTER"
@@ -55,16 +55,17 @@ index 3d5a803dc..a61fa42b1 100644
  obj-$(CONFIG_REGULATOR_STM32_PWR) += stm32-pwr.o
 diff --git a/drivers/regulator/sm5703-regulator.c b/drivers/regulator/sm5703-regulator.c
 new file mode 100644
-index 000000000..593556eed
+index 000000000..182f5264d
 --- /dev/null
 +++ b/drivers/regulator/sm5703-regulator.c
-@@ -0,0 +1,178 @@
+@@ -0,0 +1,160 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Silicon Mitus SM5703 PMIC regulator driver.
 + *
-+ * Three LDOs (1.5 V to 3.3 V), one buck (1.0 V to 3.0 V), two fixed
-+ * 4.8 V USB LDOs and the 5 V VBUS boost used for USB OTG.
++ * Three LDOs (1.5 V to 3.3 V), one buck (1.0 V to 3.0 V) and two fixed
++ * 4.8 V USB LDOs. The 5 V VBUS boost for USB OTG shares the operation
++ * mode bits with the charger and is left to a future charger driver.
 + *
 + * Based on the "Add support for Silicon Mitus SM5703 MFD" series by
 + * Markuss Broks <markuss.broks@gmail.com>.
@@ -85,7 +86,6 @@ index 000000000..593556eed
 +	SM5703_LDO3,
 +	SM5703_USBLDO1,
 +	SM5703_USBLDO2,
-+	SM5703_VBUS,
 +	SM5703_MAX_REGULATORS,
 +};
 +
@@ -135,23 +135,6 @@ index 000000000..593556eed
 +		.owner = THIS_MODULE,					\
 +	}
 +
-+#define SM5703VBUS(_name)						\
-+	[SM5703_VBUS] = {						\
-+		.name = _name,						\
-+		.of_match = _name,					\
-+		.regulators_node = "regulators",			\
-+		.type = REGULATOR_VOLTAGE,				\
-+		.id = SM5703_VBUS,					\
-+		.ops = &sm5703_regulator_ops_fixed,			\
-+		.n_voltages = 1,					\
-+		.fixed_uV = SM5703_VBUS_MICROVOLT,			\
-+		.enable_reg = SM5703_REG_CNTL,				\
-+		.enable_mask = SM5703_OPERATION_MODE_MASK,		\
-+		.enable_val = SM5703_OPERATION_MODE_USB_OTG_MODE,	\
-+		.disable_val = SM5703_OPERATION_MODE_CHARGING_ON,	\
-+		.owner = THIS_MODULE,					\
-+	}
-+
 +#define SM5703BUCK(_name)						\
 +	[SM5703_BUCK] = {						\
 +		.name = _name,						\
@@ -193,7 +176,6 @@ index 000000000..593556eed
 +	SM5703LDO("ldo3", 3),
 +	SM5703USBLDO("usbldo1", 1),
 +	SM5703USBLDO("usbldo2", 2),
-+	SM5703VBUS("vbus"),
 +};
 +
 +static int sm5703_regulator_probe(struct platform_device *pdev)
