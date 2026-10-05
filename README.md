@@ -87,12 +87,13 @@ sudo reboot
   tables, reset polarity, bus wiring, regulator constraints): no issues.
 - Tested on an SM-J500F running postmarketOS v26.06 (GNOME Mobile): the
   touchscreen works.
-- Patch 4 on hardware: the vibrator, touch keys and proximity sensor all
-  probe. The touch keys needed patch 5: without it the J5's controller
-  delivers presses but every release is dropped ("invalid keycode index
-  -1"). Proximity events still to be confirmed (enable
-  `in_proximity_thresh_either_en` under the gp2ap002 IIO device and watch
-  the event fd, or use `iio_event_monitor`).
+- Patch 4 and 5 on hardware: the touch keys work (press and release for
+  both keys, verified with `evtest`; postmarketOS's udev hwdb remaps the
+  left key from KEY_APPSELECT to KEY_MENU, which is expected). The
+  vibrator and proximity sensor probe; their function still needs a
+  manual check: trigger `fbcli -E message-new-instant` for the motor,
+  and for proximity enable `in_proximity_thresh_either_en` under the
+  gp2ap002 IIO device and watch the event fd (or `iio_event_monitor`).
 
 ## Note on flashing
 
