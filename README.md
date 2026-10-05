@@ -24,9 +24,11 @@ them into a pmbootstrap checkout so the stock postmarketOS kernel package
 | `patches/0008-clk-qcom-gcc-msm8916-*.patch` | 26 MHz camera MCLK entry (GPLL1 / 34, as downstream) |
 | `patches/0009-media-i2c-Add-Samsung-S5K5E3-*.patch` | New V4L2 driver for the front camera sensor (S5K5E3YX, RAW10, 2576x1932 / 1280x960 / 640x480 modes from Samsung's Exynos tables) |
 | `patches/0010-arm64-dts-qcom-msm8916-samsung-j5-Enable-front-camer*.patch` | J5 device tree: CCI and camss enabled, front sensor on CCI at 0x10 with MCLK1, reset GPIO 28, core enable GPIO 33 |
+| `patches/0011-power-supply-Add-SM5703-charger-status-driver.patch` | Read-only SM5703 charger power supply (VBUS present, charging/full state, configured currents), polled every 5 s |
+| `patches/0012-power-supply-sm5703-fuel-gauge-Derive-status-from-th*.patch` | Fuel gauge takes Charging/Discharging from the charger instead of the near-zero battery current |
 | `kernel/` | The new source files as plain files, for reading or reuse |
 | `pmaports/apply.sh` | Installs the patches and kernel config options into pmaports |
-| `pmaports/kconfig.fragment` | `CONFIG_MFD_SM5703=m`, `CONFIG_REGULATOR_SM5703=m`, `CONFIG_GP2AP002=m`, `CONFIG_BATTERY_SM5703=m`, `CONFIG_VIDEO_S5K5E3=m` |
+| `pmaports/kconfig.fragment` | `CONFIG_MFD_SM5703=m`, `CONFIG_REGULATOR_SM5703=m`, `CONFIG_GP2AP002=m`, `CONFIG_BATTERY_SM5703=m`, `CONFIG_VIDEO_S5K5E3=m`, `CONFIG_CHARGER_SM5703=m` |
 
 The drivers are the v5 submission by Markuss Broks from April 2022
 ("Add support for Silicon Mitus SM5703 MFD"), adapted to kernel 6.12 and
@@ -104,6 +106,10 @@ sudo reboot
   Before them the phone exposed no power_supply device at all. The driver
   programs the Samsung battery tables only when the chip has lost them
   (removable battery pulled); on this phone they were still present.
+- Patches 11 and 12 (charger status): compile-tested, not yet run on
+  hardware. On a PC USB port the battery current hovers around zero, so
+  without them the status flips between Charging and Discharging every few
+  seconds.
 - Patches 8 to 10 (front camera): compile-tested, not yet run on hardware.
   First checkpoint is the sensor ID in `dmesg | grep s5k5e3`; then raw
   frames on the camss RDI path with `media-ctl` and `yavta`, then libcamera

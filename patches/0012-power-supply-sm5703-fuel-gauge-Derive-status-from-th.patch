@@ -1,0 +1,128 @@
+From f80aaee05eb9f00ff1a109e9b683318a0ce5c900 Mon Sep 17 00:00:00 2001
+From: Toemmsen96 <147745097+Toemmsen96@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 19:03:01 +0200
+Subject: [PATCH 12/12] power: supply: sm5703-fuel-gauge: Derive status from
+ the charger
+
+On a 500 mA USB port the net battery current hovers around zero, so
+deriving the status from the sign of the current makes it flap between
+charging, discharging and not charging every few seconds.
+
+When a charger power supply (such as sm5703-charger) supplies the fuel
+gauge, use it instead: report charging while it is online, full when
+the battery is at 100 % or the charger reports a full battery, and
+discharging while it is offline. Forward external power changes as a
+power_supply_changed() event so user space picks up plug and unplug
+events.
+
+Without a charger driver, keep guessing from the current but widen the
+dead band to +/-150 mA.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ drivers/power/supply/sm5703-fuel-gauge.c | 56 +++++++++++++++++++++---
+ 1 file changed, 49 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/power/supply/sm5703-fuel-gauge.c b/drivers/power/supply/sm5703-fuel-gauge.c
+index bdf30728b..39bf7b612 100644
+--- a/drivers/power/supply/sm5703-fuel-gauge.c
++++ b/drivers/power/supply/sm5703-fuel-gauge.c
+@@ -100,8 +100,12 @@
+ #define SM5703_FG_TEMP_MASK		GENMASK(14, 0)
+ #define SM5703_FG_SIGN			BIT(15)
+ 
+-/* Current below which the battery is considered idle, in uA */
+-#define SM5703_FG_IDLE_CURRENT_UA	20000
++/*
++ * Current below which the battery is considered idle when no charger
++ * driver tells whether external power is present, in uA. It is wide on
++ * purpose: on a weak USB port the net battery current hovers around zero.
++ */
++#define SM5703_FG_IDLE_CURRENT_UA	150000
+ 
+ #define SM5703_FG_DEFAULT_ALERT_SOC	1
+ 
+@@ -519,15 +523,47 @@ static int sm5703_fg_get_capacity(struct sm5703_fg *fg, int *soc)
+ 	return 0;
+ }
+ 
+-static int sm5703_fg_get_status(struct sm5703_fg *fg, int *status)
++static bool sm5703_fg_charger_full(struct power_supply *psy)
+ {
+-	int ret, ua, soc;
++	union power_supply_propval val;
+ 
+-	ret = sm5703_fg_read_current(fg, &ua);
++	if (power_supply_get_property_from_supplier(psy,
++						    POWER_SUPPLY_PROP_STATUS,
++						    &val))
++		return false;
++
++	return val.intval == POWER_SUPPLY_STATUS_FULL;
++}
++
++static int sm5703_fg_get_status(struct sm5703_fg *fg, struct power_supply *psy,
++				int *status)
++{
++	int ret, ua, soc, supplied;
++
++	ret = sm5703_fg_read_soc(fg, &soc);
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = sm5703_fg_read_soc(fg, &soc);
++	/*
++	 * Prefer the charger's view on whether external power is present,
++	 * the battery current alone is ambiguous on a weak USB port.
++	 */
++	supplied = power_supply_am_i_supplied(psy);
++	if (supplied > 0) {
++		if (soc >= 100 || sm5703_fg_charger_full(psy))
++			*status = POWER_SUPPLY_STATUS_FULL;
++		else
++			*status = POWER_SUPPLY_STATUS_CHARGING;
++		return 0;
++	}
++
++	if (supplied == 0) {
++		*status = POWER_SUPPLY_STATUS_DISCHARGING;
++		return 0;
++	}
++
++	/* No charger driver: guess from the direction of the current */
++	ret = sm5703_fg_read_current(fg, &ua);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -551,7 +587,7 @@ static int sm5703_fg_get_property(struct power_supply *psy,
+ 
+ 	switch (psp) {
+ 	case POWER_SUPPLY_PROP_STATUS:
+-		return sm5703_fg_get_status(fg, &val->intval);
++		return sm5703_fg_get_status(fg, psy, &val->intval);
+ 	case POWER_SUPPLY_PROP_PRESENT:
+ 		/* The gauge cannot detect the battery */
+ 		val->intval = 1;
+@@ -622,6 +658,11 @@ static const enum power_supply_property sm5703_fg_props[] = {
+ 	POWER_SUPPLY_PROP_CAPACITY_ALERT_MIN,
+ };
+ 
++static void sm5703_fg_external_power_changed(struct power_supply *psy)
++{
++	power_supply_changed(psy);
++}
++
+ static irqreturn_t sm5703_fg_irq_handler(int irq, void *data)
+ {
+ 	struct sm5703_fg *fg = data;
+@@ -848,6 +889,7 @@ static int sm5703_fg_probe(struct i2c_client *client)
+ 	fg->desc.get_property = sm5703_fg_get_property;
+ 	fg->desc.set_property = sm5703_fg_set_property;
+ 	fg->desc.property_is_writeable = sm5703_fg_property_is_writeable;
++	fg->desc.external_power_changed = sm5703_fg_external_power_changed;
+ 
+ 	psy_cfg.drv_data = fg;
+ 	psy_cfg.fwnode = dev_fwnode(dev);
+-- 
+2.56.0
+

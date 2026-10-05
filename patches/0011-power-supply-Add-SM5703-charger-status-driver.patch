@@ -1,0 +1,386 @@
+From 039e432c7730a12deeac7a368ed3e812c928c79e Mon Sep 17 00:00:00 2001
+From: Toemmsen96 <147745097+Toemmsen96@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 19:03:00 +0200
+Subject: [PATCH 11/12] power: supply: Add SM5703 charger status driver
+
+Add a power supply driver for the battery charger of the Silicon Mitus
+SM5703 PMIC and instantiate it from the MFD core driver.
+
+The driver only reports the charger state, it never writes to the chip
+and leaves the charger configured as the bootloader set it up:
+
+ - ONLINE/PRESENT: VBUS is valid (STATUS5 VBUSOK set, VBUSUVLO and
+   VBUSOVP clear)
+ - STATUS: discharging without VBUS, full when the charger reports
+   charge done (STATUS3 DONE) or top-off without CHGON, charging while
+   CHGON is set, not charging otherwise
+ - CURRENT_MAX, CONSTANT_CHARGE_CURRENT and CONSTANT_CHARGE_VOLTAGE
+   decoded from the input current limit (VBUSCNTL), fast charge current
+   (CHGCNTL2) and battery regulation voltage (CHGCNTL3)
+
+The register layout follows the Samsung downstream sm5703_charger driver.
+
+The power supply is registered as supplying "sm5703-fuel-gauge", so the
+battery driver can tell whether external power is present. The PMIC
+interrupt line is not described in the device tree yet, so the status
+registers are polled every five seconds and power_supply_changed() is
+called when the online state or the charging status changes.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ drivers/mfd/Kconfig                   |   3 +-
+ drivers/mfd/sm5703.c                  |   1 +
+ drivers/power/supply/Kconfig          |  12 ++
+ drivers/power/supply/Makefile         |   1 +
+ drivers/power/supply/sm5703-charger.c | 248 ++++++++++++++++++++++++++
+ include/linux/mfd/sm5703.h            |  11 ++
+ 6 files changed, 275 insertions(+), 1 deletion(-)
+ create mode 100644 drivers/power/supply/sm5703-charger.c
+
+diff --git a/drivers/mfd/Kconfig b/drivers/mfd/Kconfig
+index 6a07222e3..cf3bce2a8 100644
+--- a/drivers/mfd/Kconfig
++++ b/drivers/mfd/Kconfig
+@@ -1378,7 +1378,8 @@ config MFD_SM5703
+ 	  Samsung Galaxy phones (e.g. J5 2015, J7 2015). It provides LDO,
+ 	  buck and USB regulators, a battery charger, a flash LED driver,
+ 	  a fuel gauge and a MUIC. This option enables the shared register
+-	  map; the regulators are handled by REGULATOR_SM5703.
++	  map; the regulators are handled by REGULATOR_SM5703 and the
++	  charger status by CHARGER_SM5703.
+ 
+ config MFD_SKY81452
+ 	tristate "Skyworks Solutions SKY81452"
+diff --git a/drivers/mfd/sm5703.c b/drivers/mfd/sm5703.c
+index 3154685b1..6d1bb0f23 100644
+--- a/drivers/mfd/sm5703.c
++++ b/drivers/mfd/sm5703.c
+@@ -23,6 +23,7 @@
+ 
+ static const struct mfd_cell sm5703_devs[] = {
+ 	{ .name = "sm5703-regulator", },
++	{ .name = "sm5703-charger", },
+ };
+ 
+ static const struct regmap_config sm5703_regmap_config = {
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index 290bb93c0..275125ff9 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -844,6 +844,18 @@ config BATTERY_SM5703
+ 	  This driver can also be built as a module. If so, the module will be
+ 	  called sm5703-fuel-gauge.
+ 
++config CHARGER_SM5703
++	tristate "Silicon Mitus SM5703 charger status support"
++	depends on MFD_SM5703
++	help
++	  Say Y here to enable support for reporting the state of the
++	  battery charger of the Silicon Mitus SM5703 PMIC: whether a charger
++	  is plugged in and whether the battery is charging or full. The
++	  charger configuration set up by the bootloader is not changed.
++
++	  This driver can also be built as a module. If so, the module will be
++	  called sm5703-charger.
++
+ config CHARGER_RT9455
+ 	tristate "Richtek RT9455 battery charger driver"
+ 	depends on I2C
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+index 3708584bd..e0060db45 100644
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -58,6 +58,7 @@ obj-$(CONFIG_BATTERY_MAX1721X)	+= max1721x_battery.o
+ obj-$(CONFIG_BATTERY_RT5033)	+= rt5033_battery.o
+ obj-$(CONFIG_CHARGER_RT5033)	+= rt5033_charger.o
+ obj-$(CONFIG_BATTERY_SM5703)	+= sm5703-fuel-gauge.o
++obj-$(CONFIG_CHARGER_SM5703)	+= sm5703-charger.o
+ obj-$(CONFIG_CHARGER_RT9455)	+= rt9455_charger.o
+ obj-$(CONFIG_CHARGER_RT9467)	+= rt9467-charger.o
+ obj-$(CONFIG_CHARGER_RT9471)	+= rt9471.o
+diff --git a/drivers/power/supply/sm5703-charger.c b/drivers/power/supply/sm5703-charger.c
+new file mode 100644
+index 000000000..cece6bc77
+--- /dev/null
++++ b/drivers/power/supply/sm5703-charger.c
+@@ -0,0 +1,248 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Silicon Mitus SM5703 charger status driver
++ *
++ * Reports whether a charger is plugged in and what the SM5703 charger is
++ * doing, so that the battery (fuel gauge) driver can derive its status from
++ * it. The charger itself is left as configured by the bootloader: this
++ * driver never writes to the chip.
++ *
++ * The PMIC interrupt line is not described in the device tree, so the
++ * status registers are polled and a change is reported to the power supply
++ * core (and thereby to the supplied fuel gauge).
++ *
++ * Register layout taken from the Samsung downstream sm5703_charger driver.
++ */
++
++#include <linux/bits.h>
++#include <linux/devm-helpers.h>
++#include <linux/err.h>
++#include <linux/mfd/sm5703.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/power_supply.h>
++#include <linux/regmap.h>
++#include <linux/workqueue.h>
++
++#define SM5703_CHG_POLL_INTERVAL	msecs_to_jiffies(5000)
++
++struct sm5703_charger {
++	struct device *dev;
++	struct regmap *regmap;
++	struct power_supply *psy;
++	struct delayed_work poll_work;
++	int online;
++	int status;
++};
++
++static int sm5703_charger_get_online(struct sm5703_charger *chg, int *online)
++{
++	unsigned int val;
++	int ret;
++
++	ret = regmap_read(chg->regmap, SM5703_REG_STATUS5, &val);
++	if (ret)
++		return ret;
++
++	*online = (val & SM5703_STATUS5_VBUSOK) &&
++		  !(val & (SM5703_STATUS5_VBUSUVLO | SM5703_STATUS5_VBUSOVP));
++
++	return 0;
++}
++
++static int sm5703_charger_get_status(struct sm5703_charger *chg, int *status)
++{
++	unsigned int val;
++	int ret, online;
++
++	ret = sm5703_charger_get_online(chg, &online);
++	if (ret)
++		return ret;
++
++	if (!online) {
++		*status = POWER_SUPPLY_STATUS_DISCHARGING;
++		return 0;
++	}
++
++	ret = regmap_read(chg->regmap, SM5703_REG_STATUS3, &val);
++	if (ret)
++		return ret;
++
++	if (val & SM5703_STATUS3_DONE)
++		*status = POWER_SUPPLY_STATUS_FULL;
++	else if (val & SM5703_STATUS3_CHGON)
++		*status = POWER_SUPPLY_STATUS_CHARGING;
++	else if (val & SM5703_STATUS3_TOPOFF)
++		*status = POWER_SUPPLY_STATUS_FULL;
++	else
++		*status = POWER_SUPPLY_STATUS_NOT_CHARGING;
++
++	return 0;
++}
++
++/* Decode a "100 mA + n * 50 mA" register field, in uA */
++static int sm5703_charger_read_current(struct sm5703_charger *chg,
++				       unsigned int reg, unsigned int mask,
++				       int *ua)
++{
++	unsigned int val;
++	int ret;
++
++	ret = regmap_read(chg->regmap, reg, &val);
++	if (ret)
++		return ret;
++
++	*ua = (100 + (val & mask) * 50) * 1000;
++
++	return 0;
++}
++
++static int sm5703_charger_get_property(struct power_supply *psy,
++				       enum power_supply_property psp,
++				       union power_supply_propval *val)
++{
++	struct sm5703_charger *chg = power_supply_get_drvdata(psy);
++	unsigned int reg;
++	int ret;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_ONLINE:
++	case POWER_SUPPLY_PROP_PRESENT:
++		return sm5703_charger_get_online(chg, &val->intval);
++	case POWER_SUPPLY_PROP_STATUS:
++		return sm5703_charger_get_status(chg, &val->intval);
++	case POWER_SUPPLY_PROP_CURRENT_MAX:
++		return sm5703_charger_read_current(chg, SM5703_REG_VBUSCNTL,
++						   SM5703_VBUSLIMIT_MASK,
++						   &val->intval);
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
++		return sm5703_charger_read_current(chg, SM5703_REG_CHGCNTL2,
++						   SM5703_FASTCHG_MASK,
++						   &val->intval);
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
++		ret = regmap_read(chg->regmap, SM5703_REG_CHGCNTL3, &reg);
++		if (ret)
++			return ret;
++		/* 4.12 V + n * 10 mV */
++		val->intval = (4120 + (reg & SM5703_BATREG_MASK) * 10) * 1000;
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++static const enum power_supply_property sm5703_charger_props[] = {
++	POWER_SUPPLY_PROP_ONLINE,
++	POWER_SUPPLY_PROP_PRESENT,
++	POWER_SUPPLY_PROP_STATUS,
++	POWER_SUPPLY_PROP_CURRENT_MAX,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE,
++};
++
++static const struct power_supply_desc sm5703_charger_desc = {
++	.name = "sm5703-charger",
++	.type = POWER_SUPPLY_TYPE_USB,
++	.properties = sm5703_charger_props,
++	.num_properties = ARRAY_SIZE(sm5703_charger_props),
++	.get_property = sm5703_charger_get_property,
++};
++
++static char *sm5703_charger_supplied_to[] = {
++	"sm5703-fuel-gauge",
++};
++
++static void sm5703_charger_poll(struct sm5703_charger *chg)
++{
++	int online, status;
++
++	if (sm5703_charger_get_online(chg, &online) ||
++	    sm5703_charger_get_status(chg, &status))
++		return;
++
++	if (online == chg->online && status == chg->status)
++		return;
++
++	dev_dbg(chg->dev, "online %d -> %d, status %d -> %d\n",
++		chg->online, online, chg->status, status);
++
++	chg->online = online;
++	chg->status = status;
++	power_supply_changed(chg->psy);
++}
++
++static void sm5703_charger_poll_work(struct work_struct *work)
++{
++	struct sm5703_charger *chg = container_of(work, struct sm5703_charger,
++						  poll_work.work);
++
++	sm5703_charger_poll(chg);
++
++	queue_delayed_work(system_freezable_power_efficient_wq,
++			   &chg->poll_work, SM5703_CHG_POLL_INTERVAL);
++}
++
++static int sm5703_charger_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct power_supply_config psy_cfg = {};
++	struct sm5703_charger *chg;
++	int ret;
++
++	chg = devm_kzalloc(dev, sizeof(*chg), GFP_KERNEL);
++	if (!chg)
++		return -ENOMEM;
++
++	chg->dev = dev;
++	chg->regmap = dev_get_regmap(dev->parent, NULL);
++	if (!chg->regmap)
++		return dev_err_probe(dev, -ENODEV, "failed to get regmap\n");
++
++	ret = sm5703_charger_get_online(chg, &chg->online);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to read status\n");
++
++	ret = sm5703_charger_get_status(chg, &chg->status);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to read status\n");
++
++	psy_cfg.drv_data = chg;
++	psy_cfg.supplied_to = sm5703_charger_supplied_to;
++	psy_cfg.num_supplicants = ARRAY_SIZE(sm5703_charger_supplied_to);
++
++	chg->psy = devm_power_supply_register(dev, &sm5703_charger_desc,
++					      &psy_cfg);
++	if (IS_ERR(chg->psy))
++		return dev_err_probe(dev, PTR_ERR(chg->psy),
++				     "failed to register power supply\n");
++
++	/* Cancelled before the power supply is unregistered */
++	ret = devm_delayed_work_autocancel(dev, &chg->poll_work,
++					   sm5703_charger_poll_work);
++	if (ret)
++		return ret;
++
++	queue_delayed_work(system_freezable_power_efficient_wq,
++			   &chg->poll_work, SM5703_CHG_POLL_INTERVAL);
++
++	return 0;
++}
++
++static const struct platform_device_id sm5703_charger_id[] = {
++	{ "sm5703-charger" },
++	{ }
++};
++MODULE_DEVICE_TABLE(platform, sm5703_charger_id);
++
++static struct platform_driver sm5703_charger_driver = {
++	.driver = {
++		.name = "sm5703-charger",
++	},
++	.probe = sm5703_charger_probe,
++	.id_table = sm5703_charger_id,
++};
++module_platform_driver(sm5703_charger_driver);
++
++MODULE_DESCRIPTION("Silicon Mitus SM5703 charger status driver");
++MODULE_LICENSE("GPL");
+diff --git a/include/linux/mfd/sm5703.h b/include/linux/mfd/sm5703.h
+index 0a19302f6..5fb2a23a2 100644
+--- a/include/linux/mfd/sm5703.h
++++ b/include/linux/mfd/sm5703.h
+@@ -38,6 +38,14 @@ struct sm5703_dev {
+ #define SM5703_REG_STATUS4			0x0B
+ #define SM5703_REG_STATUS5			0x6B
+ 
++#define SM5703_STATUS1_OTGFAIL			BIT(7)
++#define SM5703_STATUS3_DONE			BIT(3)
++#define SM5703_STATUS3_TOPOFF			BIT(2)
++#define SM5703_STATUS3_CHGON			BIT(0)
++#define SM5703_STATUS5_VBUSOVP			BIT(7)
++#define SM5703_STATUS5_VBUSUVLO			BIT(6)
++#define SM5703_STATUS5_VBUSOK			BIT(5)
++
+ /* Control register: operation mode (bits 0-2) and USB LDO enables */
+ #define SM5703_REG_CNTL				0x0C
+ #define SM5703_OPERATION_MODE_MASK		GENMASK(2, 0)
+@@ -58,6 +66,9 @@ struct sm5703_dev {
+ #define SM5703_REG_CHGCNTL4			0x11
+ #define SM5703_REG_CHGCNTL5			0x12
+ #define SM5703_REG_CHGCNTL6			0x13
++#define SM5703_VBUSLIMIT_MASK			GENMASK(5, 0)	/* VBUSCNTL */
++#define SM5703_FASTCHG_MASK			GENMASK(5, 0)	/* CHGCNTL2 */
++#define SM5703_BATREG_MASK			GENMASK(4, 0)	/* CHGCNTL3 */
+ #define SM5703_REG_OTGCURRENTCNTL		0x60
+ #define SM5703_REG_Q3LIMITCNTL			0x66
+ 
+-- 
+2.56.0
+
