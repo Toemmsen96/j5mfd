@@ -24,20 +24,27 @@ kdir=$(find "$pmaports/device" -maxdepth 2 -type d -name linux-postmarketos-qcom
 apkbuild="$kdir/APKBUILD"
 echo "Kernel package: $kdir"
 
-if grep -q 'sm5703' "$apkbuild"; then
-	echo "APKBUILD already references the sm5703 patches; refreshing patch files only"
-else
-	# Insert the patch file names before the closing quote of source="...".
-	names=$(cd "$patches" && ls *.patch | sed 's/^/\t/')
-	awk -v names="$names" '
-		/^source="/ { insrc=1 }
-		insrc && /^"$/ { print names; insrc=0 }
-		{ print }
-	' "$apkbuild" > "$apkbuild.tmp" && mv "$apkbuild.tmp" "$apkbuild"
-
+# Add any patch not yet listed in source="..." (before its closing quote)
+# and bump pkgrel once if something was added.
+added=0
+for f in "$patches"/*.patch; do
+	name=$(basename "$f")
+	if ! grep -qF "$name" "$apkbuild"; then
+		awk -v name="$name" '
+			/^source="/ { insrc=1 }
+			insrc && /^"$/ { printf "\t%s\n", name; insrc=0 }
+			{ print }
+		' "$apkbuild" > "$apkbuild.tmp" && mv "$apkbuild.tmp" "$apkbuild"
+		echo "added $name to source="
+		added=1
+	fi
+done
+if [ "$added" = 1 ]; then
 	rel=$(sed -n 's/^pkgrel=//p' "$apkbuild")
 	sed -i "s/^pkgrel=.*/pkgrel=$((rel + 1))/" "$apkbuild"
 	echo "pkgrel bumped to $((rel + 1))"
+else
+	echo "all patches already listed in APKBUILD; refreshing files only"
 fi
 
 cp "$patches"/*.patch "$kdir/"

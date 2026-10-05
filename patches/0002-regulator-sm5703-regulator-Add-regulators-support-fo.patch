@@ -1,7 +1,7 @@
 From e4de24a9d7f40fdc9061e89449bc8113612f4830 Mon Sep 17 00:00:00 2001
 From: Markuss Broks <markuss.broks@gmail.com>
 Date: Mon, 5 Oct 2026 16:52:25 +0200
-Subject: [PATCH 2/3] regulator: sm5703-regulator: Add regulators support for
+Subject: [PATCH 2/4] regulator: sm5703-regulator: Add regulators support for
  the SM5703 PMIC
 
 The regulator block of the SM5703 controls three LDOs (1.5 V to 3.3 V),

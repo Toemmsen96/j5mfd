@@ -1,0 +1,173 @@
+From 6979c7c633699c2c422560ca1d92f22a97874779 Mon Sep 17 00:00:00 2001
+From: Toemmsen96 <147745097+Toemmsen96@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 17:41:58 +0200
+Subject: [PATCH 4/4] arm64: dts: qcom: msm8916-samsung-j5: Add vibrator, touch
+ keys and proximity sensor
+
+With the SM5703 regulators available, describe the remaining input
+hardware of the Galaxy J5 (2015), taken from the downstream device tree:
+
+ - the vibration motor is powered directly from SM5703 LDO2 at 3.3 V,
+   so a regulator-haptic node is all that is needed
+ - the two capacitive keys are a Coreriver TC360 on a bit-banged I2C
+   bus (GPIO 101/102), interrupt on GPIO 98, powered through a rail
+   switched by GPIO 120, the same arrangement as on the Galaxy A 2015
+ - the proximity sensor is a Sharp GP2AP002S00F at 0x44 on the sensor
+   bus, interrupt on GPIO 113. Downstream additionally drives GPIO 73
+   high to power it, which is modelled as a fixed regulator fed from
+   L17. The hysteresis values are the ones the downstream J5 kernel
+   config selects (GP2A mode B15)
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../boot/dts/qcom/msm8916-samsung-j5.dts      | 122 ++++++++++++++++++
+ 1 file changed, 122 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts b/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts
+index 6d1fd95b0..c02dace5f 100644
+--- a/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts
++++ b/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts
+@@ -8,6 +8,70 @@ / {
+ 	model = "Samsung Galaxy J5 (2015)";
+ 	compatible = "samsung,j5", "qcom,msm8916";
+ 	chassis-type = "handset";
++
++	haptic {
++		compatible = "regulator-haptic";
++		haptic-supply = <&reg_vdd_motor>;
++		min-microvolt = <3300000>;
++		max-microvolt = <3300000>;
++	};
++
++	i2c_tkey: i2c-tkey {
++		compatible = "i2c-gpio";
++		sda-gpios = <&tlmm 101 (GPIO_ACTIVE_HIGH|GPIO_OPEN_DRAIN)>;
++		scl-gpios = <&tlmm 102 (GPIO_ACTIVE_HIGH|GPIO_OPEN_DRAIN)>;
++
++		pinctrl-0 = <&tkey_i2c_default>;
++		pinctrl-names = "default";
++
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		touchkey@20 {
++			compatible = "coreriver,tc360-touchkey";
++			reg = <0x20>;
++
++			interrupts-extended = <&tlmm 98 IRQ_TYPE_EDGE_FALLING>;
++
++			vcc-supply = <&reg_touch_key>;
++			vdd-supply = <&reg_touch_key>;
++			vddio-supply = <&pm8916_l6>;
++
++			linux,keycodes = <KEY_APPSELECT KEY_BACK>;
++
++			pinctrl-0 = <&tkey_default>;
++			pinctrl-names = "default";
++		};
++	};
++
++	/* GPIO 73 gates the proximity sensor supply derived from L17 */
++	reg_prox_vdd: regulator-prox-vdd {
++		compatible = "regulator-fixed";
++		regulator-name = "prox_vdd";
++		regulator-min-microvolt = <3000000>;
++		regulator-max-microvolt = <3000000>;
++
++		vin-supply = <&pm8916_l17>;
++
++		gpio = <&tlmm 73 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++
++		pinctrl-0 = <&prox_en_default>;
++		pinctrl-names = "default";
++	};
++
++	reg_touch_key: regulator-touch-key {
++		compatible = "regulator-fixed";
++		regulator-name = "touch_key";
++		regulator-min-microvolt = <3300000>;
++		regulator-max-microvolt = <3300000>;
++
++		gpio = <&tlmm 120 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++
++		pinctrl-0 = <&tkey_en_default>;
++		pinctrl-names = "default";
++	};
+ };
+ 
+ &accelerometer {
+@@ -64,6 +128,24 @@ reg_usbldo2: usbldo2 {
+ 	};
+ };
+ 
++&i2c_sensors {
++	proximity@44 {
++		compatible = "sharp,gp2ap002s00f";
++		reg = <0x44>;
++
++		interrupts-extended = <&tlmm 113 IRQ_TYPE_EDGE_FALLING>;
++
++		vdd-supply = <&reg_prox_vdd>;
++		vio-supply = <&pm8916_l5>;
++
++		sharp,proximity-far-hysteresis = /bits/ 8 <0x2f>;
++		sharp,proximity-close-hysteresis = /bits/ 8 <0x0d>;
++
++		pinctrl-0 = <&prox_int_default>;
++		pinctrl-names = "default";
++	};
++};
++
+ &front_flash_led {
+ 	ctrl-gpios = <&tlmm 50 GPIO_ACTIVE_HIGH>;
+ };
+@@ -105,4 +187,44 @@ pmic_reset_default: pmic-reset-default-state {
+ 		drive-strength = <2>;
+ 		bias-disable;
+ 	};
++
++	prox_en_default: prox-en-default-state {
++		pins = "gpio73";
++		function = "gpio";
++
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	prox_int_default: prox-int-default-state {
++		pins = "gpio113";
++		function = "gpio";
++
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	tkey_default: tkey-default-state {
++		pins = "gpio98";
++		function = "gpio";
++
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	tkey_en_default: tkey-en-default-state {
++		pins = "gpio120";
++		function = "gpio";
++
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	tkey_i2c_default: tkey-i2c-default-state {
++		pins = "gpio101", "gpio102";
++		function = "gpio";
++
++		drive-strength = <2>;
++		bias-disable;
++	};
+ };
+-- 
+2.56.0
+

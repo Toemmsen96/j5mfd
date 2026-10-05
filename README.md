@@ -16,10 +16,11 @@ them into a pmbootstrap checkout so the stock postmarketOS kernel package
 | --- | --- |
 | `patches/0001-mfd-sm5703-*.patch` | SM5703 PMIC core driver, register header, device-tree binding |
 | `patches/0002-regulator-sm5703-*.patch` | Regulator driver: 3 LDOs, buck, 2 USB LDOs |
-| `patches/0003-arm64-dts-qcom-msm8916-samsung-j5-*.patch` | J5 device tree: PMIC on BLSP I2C6, LDO3 feeds the touchscreen, touchscreen bus enabled |
+| `patches/0003-arm64-dts-qcom-msm8916-samsung-j5-Add-SM5703-*.patch` | J5 device tree: PMIC on BLSP I2C6, LDO3 feeds the touchscreen, touchscreen bus enabled |
+| `patches/0004-arm64-dts-qcom-msm8916-samsung-j5-Add-vibrator-*.patch` | J5 device tree: vibrator (SM5703 LDO2), TC360 touch keys, GP2AP002 proximity sensor |
 | `kernel/` | The new source files as plain files, for reading or reuse |
 | `pmaports/apply.sh` | Installs the patches and kernel config options into pmaports |
-| `pmaports/kconfig.fragment` | `CONFIG_MFD_SM5703=m`, `CONFIG_REGULATOR_SM5703=m` |
+| `pmaports/kconfig.fragment` | `CONFIG_MFD_SM5703=m`, `CONFIG_REGULATOR_SM5703=m`, `CONFIG_GP2AP002=m` |
 
 The drivers are the v5 submission by Markuss Broks from April 2022
 ("Add support for Silicon Mitus SM5703 MFD"), adapted to kernel 6.12 and
@@ -62,6 +63,18 @@ cat /sys/class/regulator/regulator.*/state      # vdd_tsp should be "enabled"
 evtest                                           # pick the IST3038C device, touch the screen
 ```
 
+## Updating an already flashed phone
+
+After changing the patches, rebuild the kernel package and push it to the
+phone over the USB network instead of reflashing:
+
+```sh
+pmaports/apply.sh
+pmbootstrap build --force linux-postmarketos-qcom-msm8916
+pmbootstrap sideload linux-postmarketos-qcom-msm8916
+ssh 172.16.42.1 sudo reboot
+```
+
 ## Status
 
 - Drivers compile with clang for arm64 against the postmarketOS msm8916
@@ -72,6 +85,10 @@ evtest                                           # pick the IST3038C device, tou
   tables, reset polarity, bus wiring, regulator constraints): no issues.
 - Tested on an SM-J500F running postmarketOS v26.06 (GNOME Mobile): the
   touchscreen works.
+- Patch 4 (vibrator, touch keys, proximity sensor) builds but is not yet
+  tested on hardware. Check with `evtest` (touch keys report KEY_APPSELECT
+  and KEY_BACK), `fftest` or a GNOME haptic event (vibrator), and
+  `iio_info` or `/sys/bus/iio/devices/` (proximity events).
 
 ## Note on flashing
 
