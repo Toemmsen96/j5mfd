@@ -19,9 +19,11 @@ them into a pmbootstrap checkout so the stock postmarketOS kernel package
 | `patches/0003-arm64-dts-qcom-msm8916-samsung-j5-Add-SM5703-*.patch` | J5 device tree: PMIC on BLSP I2C6, LDO3 feeds the touchscreen, touchscreen bus enabled |
 | `patches/0004-arm64-dts-qcom-msm8916-samsung-j5-Add-vibrator-*.patch` | J5 device tree: vibrator (SM5703 LDO2), Coreriver touch keys, GP2AP002 proximity sensor |
 | `patches/0005-Input-tm2-touchkey-*.patch` | tm2-touchkey driver: decode the Coreriver TC300K press/release bitmap the J5's key controller reports |
+| `patches/0006-power-supply-Add-Silicon-Mitus-SM5703-fuel-gauge-*.patch` | New power-supply driver for the SM5703 fuel gauge (voltage, current, SoC, chip temperature, low-SoC alert, battery parameter programming from DT) |
+| `patches/0007-arm64-dts-qcom-msm8916-samsung-j5-Add-SM5703-fuel-ga*.patch` | J5 device tree: fuel gauge at 0x71 on a bit-banged bus (GPIO 14/15), alert on GPIO 121, J5 battery tables |
 | `kernel/` | The new source files as plain files, for reading or reuse |
 | `pmaports/apply.sh` | Installs the patches and kernel config options into pmaports |
-| `pmaports/kconfig.fragment` | `CONFIG_MFD_SM5703=m`, `CONFIG_REGULATOR_SM5703=m`, `CONFIG_GP2AP002=m` |
+| `pmaports/kconfig.fragment` | `CONFIG_MFD_SM5703=m`, `CONFIG_REGULATOR_SM5703=m`, `CONFIG_GP2AP002=m`, `CONFIG_BATTERY_SM5703=m` |
 
 The drivers are the v5 submission by Markuss Broks from April 2022
 ("Add support for Silicon Mitus SM5703 MFD"), adapted to kernel 6.12 and
@@ -93,9 +95,13 @@ sudo reboot
   proximity sensor (NEAR/FAR IIO events) all work. The proximity sensor
   only works because GPIO 73 is driven as its power enable; without it
   the sensor never raises an interrupt, which matches the old wiki note.
+- Patches 6 and 7 (battery): compile-tested, not yet run on hardware. Before
+  them the phone exposes no power_supply device at all. The driver reports
+  the gauge's own state of charge and programs the Samsung battery tables
+  only when the chip has lost them (removable battery pulled).
 - Still open on the wiki's list: camera (no mainline support for these
   sensors), battery (SM5703 fuel gauge at a separate I2C address, no
-  mainline driver), USB OTG (needs the SM5703 VBUS boost), accelerometer
+  mainline driver, now addressed by patches 6/7), USB OTG (needs the SM5703 VBUS boost), accelerometer
   mount matrix (needs testing by rotating the phone).
 
 ## Note on flashing

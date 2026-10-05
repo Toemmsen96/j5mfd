@@ -1,0 +1,1184 @@
+From 5b486e35e3e4905589a8225bda511663f564d392 Mon Sep 17 00:00:00 2001
+From: Toemmsen96 <147745097+Toemmsen96@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 18:45:00 +0200
+Subject: [PATCH 6/7] power: supply: Add Silicon Mitus SM5703 fuel gauge driver
+
+The fuel gauge of the Silicon Mitus SM5703 PMIC is a separate I2C
+device with 16-bit little-endian registers. It estimates the state of
+charge from the battery voltage and current with a battery model held
+in volatile memory, so the model is lost whenever the gauge loses power
+(e.g. when the removable battery is pulled) and has to be programmed
+again by the driver.
+
+Add a driver based on the Samsung downstream sm5703_fuelgauge driver:
+ - report status, voltage, open circuit voltage, current, state of
+   charge and the gauge temperature
+ - program the battery model (OCV and capacity tables, RCE, DTCD, RS,
+   mixing and calibration values) from the device tree when the
+   FG_OP_STATUS register says the gauge is not initialised, and seed it
+   with the initial OCV sampled by the gauge at power up
+ - reprogram the gauge if it resets itself at runtime, as the
+   downstream driver does
+ - use the alert interrupt for a low state of charge alert with a
+   threshold exposed as capacity_alert_min
+
+The dynamic temperature compensation of the current calibration and
+the RS manual mode switching done by the downstream driver are left out
+for now.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../siliconmitus,sm5703-fuel-gauge.yaml       | 190 ++++
+ drivers/power/supply/Kconfig                  |  13 +
+ drivers/power/supply/Makefile                 |   1 +
+ drivers/power/supply/sm5703-fuel-gauge.c      | 905 ++++++++++++++++++
+ 4 files changed, 1109 insertions(+)
+ create mode 100644 Documentation/devicetree/bindings/power/supply/siliconmitus,sm5703-fuel-gauge.yaml
+ create mode 100644 drivers/power/supply/sm5703-fuel-gauge.c
+
+diff --git a/Documentation/devicetree/bindings/power/supply/siliconmitus,sm5703-fuel-gauge.yaml b/Documentation/devicetree/bindings/power/supply/siliconmitus,sm5703-fuel-gauge.yaml
+new file mode 100644
+index 000000000..619514146
+--- /dev/null
++++ b/Documentation/devicetree/bindings/power/supply/siliconmitus,sm5703-fuel-gauge.yaml
+@@ -0,0 +1,190 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/power/supply/siliconmitus,sm5703-fuel-gauge.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Silicon Mitus SM5703 Fuel Gauge
++
++maintainers:
++  - Toemmsen96 <147745097+Toemmsen96@users.noreply.github.com>
++
++description: |
++  The fuel gauge of the Silicon Mitus SM5703 PMIC is a separate I2C device.
++  It estimates the battery state of charge from the battery voltage and
++  current using a battery model kept in volatile memory. The model is lost
++  whenever the gauge loses power, for example when a removable battery is
++  pulled, and is then programmed again from the properties below.
++
++  All battery model values are raw 16-bit register values as found in the
++  vendor device tree for the specific battery. If the battery model is
++  given, all of its properties are required.
++
++allOf:
++  - $ref: power-supply.yaml#
++
++properties:
++  compatible:
++    const: siliconmitus,sm5703-fuel-gauge
++
++  reg:
++    maxItems: 1
++
++  interrupts:
++    maxItems: 1
++    description: Alert interrupt, used for the low state of charge alert.
++
++  siliconmitus,battery-table-0:
++    $ref: /schemas/types.yaml#/definitions/uint32-array
++    description: Discharge OCV table, written to registers 0xa0-0xaf.
++    minItems: 16
++    maxItems: 16
++    items:
++      maximum: 0xffff
++
++  siliconmitus,battery-table-1:
++    $ref: /schemas/types.yaml#/definitions/uint32-array
++    description: Charge OCV table, written to registers 0xb0-0xbf.
++    minItems: 16
++    maxItems: 16
++    items:
++      maximum: 0xffff
++
++  siliconmitus,battery-table-2:
++    $ref: /schemas/types.yaml#/definitions/uint32-array
++    description: Capacity (Q) table, written to registers 0xc0-0xcf.
++    minItems: 16
++    maxItems: 16
++    items:
++      maximum: 0xffff
++
++  siliconmitus,rce:
++    $ref: /schemas/types.yaml#/definitions/uint32-array
++    description: RCE0-RCE2 values (registers 0x20-0x22).
++    minItems: 3
++    maxItems: 3
++    items:
++      maximum: 0xffff
++
++  siliconmitus,dtcd:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: DTCD value (register 0x23).
++    maximum: 0xffff
++
++  siliconmitus,rs:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: Battery resistance RS value (register 0x24).
++    maximum: 0xffff
++
++  siliconmitus,rs-mix-factor:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: RS mixing factor (register 0x25).
++    maximum: 0xffff
++
++  siliconmitus,rs-max:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: Maximum RS value (register 0x26).
++    maximum: 0xffff
++
++  siliconmitus,rs-min:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: Minimum RS value (register 0x27).
++    maximum: 0xffff
++
++  siliconmitus,vit-period:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: Voltage, current and temperature measurement period
++      (register 0x1a).
++    maximum: 0xffff
++
++  siliconmitus,mix-rate:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: Mixing rate (register 0x1b).
++    maximum: 0xffff
++
++  siliconmitus,mix-init-blank:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: Mixing initial blank time (register 0x1c).
++    maximum: 0xffff
++
++  siliconmitus,volt-cal:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: Voltage calibration (register 0x2b).
++    maximum: 0xffff
++
++  siliconmitus,curr-cal:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: Current calibration (register 0x2c).
++    maximum: 0xffff
++
++  siliconmitus,topoff-soc:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    description: Top-off state of charge setting (register 0x12).
++    maximum: 0xffff
++
++  siliconmitus,topoff-soc-enable:
++    type: boolean
++    description: Enable the top-off state of charge function.
++
++dependentRequired:
++  siliconmitus,battery-table-0:
++    - siliconmitus,battery-table-1
++    - siliconmitus,battery-table-2
++    - siliconmitus,rce
++    - siliconmitus,dtcd
++    - siliconmitus,rs
++    - siliconmitus,rs-mix-factor
++    - siliconmitus,rs-max
++    - siliconmitus,rs-min
++    - siliconmitus,vit-period
++    - siliconmitus,mix-rate
++    - siliconmitus,mix-init-blank
++    - siliconmitus,volt-cal
++    - siliconmitus,curr-cal
++    - siliconmitus,topoff-soc
++
++required:
++  - compatible
++  - reg
++
++unevaluatedProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/interrupt-controller/irq.h>
++
++    i2c {
++      #address-cells = <1>;
++      #size-cells = <0>;
++
++      fuel-gauge@71 {
++        compatible = "siliconmitus,sm5703-fuel-gauge";
++        reg = <0x71>;
++        interrupts-extended = <&tlmm 121 IRQ_TYPE_EDGE_FALLING>;
++
++        siliconmitus,battery-table-0 = <0x1400 0x1b33 0x1c4d 0x1d6c 0x1d88
++                                        0x1db9 0x1de0 0x1dfa 0x1e26 0x1e9e
++                                        0x1ecd 0x1f12 0x1f60 0x20e9 0x225c
++                                        0x2399>;
++        siliconmitus,battery-table-1 = <0x1400 0x1b33 0x1c4d 0x1d6c 0x1d88
++                                        0x1db9 0x1de0 0x1dfa 0x1e26 0x1e9e
++                                        0x1ecd 0x1f12 0x1f60 0x20e9 0x225c
++                                        0x2399>;
++        siliconmitus,battery-table-2 = <0x0000 0x002f 0x00b8 0x0171 0x02fc
++                                        0x0380 0x0403 0x0487 0x058f 0x09ad
++                                        0x0ab5 0x0bbc 0x0c40 0x10e2 0x1497
++                                        0x149c>;
++        siliconmitus,rce = <0x0749 0x0580 0x0371>;
++        siliconmitus,dtcd = <0x0001>;
++        siliconmitus,rs = <0x01ae>;
++        siliconmitus,rs-mix-factor = <0x047a>;
++        siliconmitus,rs-max = <0x3800>;
++        siliconmitus,rs-min = <0x00a4>;
++        siliconmitus,vit-period = <0x3506>;
++        siliconmitus,mix-rate = <0x0503>;
++        siliconmitus,mix-init-blank = <0x0004>;
++        siliconmitus,volt-cal = <0x8000>;
++        siliconmitus,curr-cal = <0x7500>;
++        siliconmitus,topoff-soc = <0x0005>;
++      };
++    };
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index c84db0624..290bb93c0 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -831,6 +831,19 @@ config CHARGER_RT5033
+ 	  The device supports pre-charge mode, fast charge mode and
+ 	  constant voltage mode.
+ 
++config BATTERY_SM5703
++	tristate "Silicon Mitus SM5703 fuel gauge support"
++	depends on I2C
++	select REGMAP_I2C
++	help
++	  Say Y here to enable support for the fuel gauge of the Silicon Mitus
++	  SM5703 PMIC, found in some Samsung phones such as the Galaxy J5.
++	  It reports the battery voltage, current and state of charge, and
++	  programs the battery model when the gauge has lost it.
++
++	  This driver can also be built as a module. If so, the module will be
++	  called sm5703-fuel-gauge.
++
+ config CHARGER_RT9455
+ 	tristate "Richtek RT9455 battery charger driver"
+ 	depends on I2C
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+index 5b1b00860..3708584bd 100644
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -57,6 +57,7 @@ obj-$(CONFIG_BATTERY_MAX1720X)	+= max1720x_battery.o
+ obj-$(CONFIG_BATTERY_MAX1721X)	+= max1721x_battery.o
+ obj-$(CONFIG_BATTERY_RT5033)	+= rt5033_battery.o
+ obj-$(CONFIG_CHARGER_RT5033)	+= rt5033_charger.o
++obj-$(CONFIG_BATTERY_SM5703)	+= sm5703-fuel-gauge.o
+ obj-$(CONFIG_CHARGER_RT9455)	+= rt9455_charger.o
+ obj-$(CONFIG_CHARGER_RT9467)	+= rt9467-charger.o
+ obj-$(CONFIG_CHARGER_RT9471)	+= rt9471.o
+diff --git a/drivers/power/supply/sm5703-fuel-gauge.c b/drivers/power/supply/sm5703-fuel-gauge.c
+new file mode 100644
+index 000000000..bdf30728b
+--- /dev/null
++++ b/drivers/power/supply/sm5703-fuel-gauge.c
+@@ -0,0 +1,905 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Silicon Mitus SM5703 fuel gauge driver
++ *
++ * The SM5703 fuel gauge is a separate I2C device next to the SM5703 PMIC.
++ * It estimates the state of charge from the battery voltage and current
++ * with a battery model that lives in volatile memory: whenever the gauge
++ * loses power (e.g. when the removable battery is pulled) the model has to
++ * be programmed again from the battery parameters in the device tree.
++ *
++ * Based on the Samsung downstream sm5703_fuelgauge driver by Dongik Sin
++ * and SW Jung.
++ */
++
++#include <linux/bits.h>
++#include <linux/cleanup.h>
++#include <linux/delay.h>
++#include <linux/device.h>
++#include <linux/i2c.h>
++#include <linux/interrupt.h>
++#include <linux/limits.h>
++#include <linux/math.h>
++#include <linux/minmax.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/pm_wakeirq.h>
++#include <linux/power_supply.h>
++#include <linux/property.h>
++#include <linux/regmap.h>
++
++#define SM5703_FG_REG_DEVICE_ID		0x00
++#define SM5703_FG_REG_CNTL		0x01
++#define SM5703_FG_REG_INTFG		0x02
++#define SM5703_FG_REG_INTFG_MASK	0x03
++#define SM5703_FG_REG_STATUS		0x04
++#define SM5703_FG_REG_SOC		0x05
++#define SM5703_FG_REG_OCV		0x06
++#define SM5703_FG_REG_VOLTAGE		0x07
++#define SM5703_FG_REG_CURRENT		0x08
++#define SM5703_FG_REG_TEMPERATURE	0x09
++#define SM5703_FG_REG_SOC_ALARM		0x0e
++#define SM5703_FG_REG_OP_STATUS		0x10
++#define SM5703_FG_REG_TOPOFF_SOC	0x12
++#define SM5703_FG_REG_PARAM_CTRL	0x13
++#define SM5703_FG_REG_PARAM_RUN_UPDATE	0x14
++#define SM5703_FG_REG_VIT_PERIOD	0x1a
++#define SM5703_FG_REG_MIX_RATE		0x1b
++#define SM5703_FG_REG_MIX_INIT_BLANK	0x1c
++#define SM5703_FG_REG_RCE0		0x20
++#define SM5703_FG_REG_DTCD		0x23
++#define SM5703_FG_REG_RS		0x24
++#define SM5703_FG_REG_RS_MIX_FACTOR	0x25
++#define SM5703_FG_REG_RS_MAX		0x26
++#define SM5703_FG_REG_RS_MIN		0x27
++#define SM5703_FG_REG_VOLT_CAL		0x2b
++#define SM5703_FG_REG_CURR_CAL		0x2c
++#define SM5703_FG_REG_IOCV_MAN		0x2e
++#define SM5703_FG_REG_END_V_IDX		0x2f
++#define SM5703_FG_REG_IOCV_B_L(n)	(0x30 + (n))
++#define SM5703_FG_REG_IOCV_B_S(n)	(0x40 + (n))
++#define SM5703_FG_REG_MISC		0x90
++#define SM5703_FG_REG_TABLE(t, n)	(0xa0 + 0x10 * (t) + (n))
++
++#define SM5703_FG_CNTL_MIX_MODE		BIT(15)
++#define SM5703_FG_CNTL_TEMP_MEASURE	BIT(14)
++#define SM5703_FG_CNTL_TOPOFF_SOC	BIT(13)
++#define SM5703_FG_CNTL_MANUAL_OCV	BIT(10)
++#define SM5703_FG_CNTL_SOC_ALARM	BIT(3)
++#define SM5703_FG_CNTL_T_H_ALARM	BIT(2)
++#define SM5703_FG_CNTL_T_L_ALARM	BIT(1)
++#define SM5703_FG_CNTL_V_ALARM		BIT(0)
++#define SM5703_FG_CNTL_ALARMS		GENMASK(3, 0)
++#define SM5703_FG_CNTL_RESET_VALUE	0x2008
++
++/* Bits shared by INTFG, INTFG_MASK and STATUS */
++#define SM5703_FG_INT_L_SOC		BIT(3)
++#define SM5703_FG_INT_H_TEMP		BIT(2)
++#define SM5703_FG_INT_L_TEMP		BIT(1)
++#define SM5703_FG_INT_L_VOLT		BIT(0)
++#define SM5703_FG_INT_ALL		GENMASK(3, 0)
++
++#define SM5703_FG_OP_STATUS_INIT_MASK	GENMASK(7, 0)
++#define SM5703_FG_OP_STATUS_INIT_DONE	0x07
++
++#define SM5703_FG_PARAM_UNLOCK		0x3700
++#define SM5703_FG_PARAM_LOCK		0x0000
++#define SM5703_FG_TABLE_LEN		16
++#define SM5703_FG_NUM_TABLES		3
++
++#define SM5703_FG_END_V_IDX_IOCV_S	GENMASK(5, 4)
++#define SM5703_FG_MISC_SW_RESET		BIT(3)
++
++/*
++ * VOLTAGE, OCV and CURRENT hold a value in 1/256 V (A) units in bits 10:0,
++ * CURRENT and TEMPERATURE use bit 15 as sign (sign-magnitude), and SOC
++ * holds the state of charge in 1/256 % units.
++ */
++#define SM5703_FG_VALUE_MASK		GENMASK(10, 0)
++#define SM5703_FG_TEMP_MASK		GENMASK(14, 0)
++#define SM5703_FG_SIGN			BIT(15)
++
++/* Current below which the battery is considered idle, in uA */
++#define SM5703_FG_IDLE_CURRENT_UA	20000
++
++#define SM5703_FG_DEFAULT_ALERT_SOC	1
++
++struct sm5703_fg_dt_param {
++	const char *name;
++	unsigned int reg;
++	unsigned int count;
++};
++
++/* Written after unlocking the parameters, before setting the table length */
++static const struct sm5703_fg_dt_param sm5703_fg_params_pre[] = {
++	{ "siliconmitus,rce",		SM5703_FG_REG_RCE0,		3 },
++	{ "siliconmitus,dtcd",		SM5703_FG_REG_DTCD,		1 },
++	{ "siliconmitus,rs",		SM5703_FG_REG_RS,		1 },
++	{ "siliconmitus,vit-period",	SM5703_FG_REG_VIT_PERIOD,	1 },
++};
++
++/* Written after setting the table length */
++static const struct sm5703_fg_dt_param sm5703_fg_params_post[] = {
++	{ "siliconmitus,battery-table-0", SM5703_FG_REG_TABLE(0, 0),
++	  SM5703_FG_TABLE_LEN },
++	{ "siliconmitus,battery-table-1", SM5703_FG_REG_TABLE(1, 0),
++	  SM5703_FG_TABLE_LEN },
++	{ "siliconmitus,battery-table-2", SM5703_FG_REG_TABLE(2, 0),
++	  SM5703_FG_TABLE_LEN },
++	{ "siliconmitus,rs-mix-factor",	SM5703_FG_REG_RS_MIX_FACTOR,	1 },
++	{ "siliconmitus,rs-max",	SM5703_FG_REG_RS_MAX,		1 },
++	{ "siliconmitus,rs-min",	SM5703_FG_REG_RS_MIN,		1 },
++	{ "siliconmitus,mix-rate",	SM5703_FG_REG_MIX_RATE,		1 },
++	{ "siliconmitus,mix-init-blank", SM5703_FG_REG_MIX_INIT_BLANK,	1 },
++	{ "siliconmitus,volt-cal",	SM5703_FG_REG_VOLT_CAL,		1 },
++	{ "siliconmitus,curr-cal",	SM5703_FG_REG_CURR_CAL,		1 },
++	{ "siliconmitus,topoff-soc",	SM5703_FG_REG_TOPOFF_SOC,	1 },
++};
++
++struct sm5703_fg_reg_val {
++	u8 reg;
++	u16 val;
++};
++
++struct sm5703_fg {
++	struct device *dev;
++	struct regmap *regmap;
++	struct power_supply *psy;
++	struct power_supply_desc desc;
++	/* Serialises (re)initialisation and alert configuration */
++	struct mutex lock;
++
++	/* Battery model, NULL if the device tree does not provide one */
++	const struct sm5703_fg_reg_val *params;
++	unsigned int num_params;
++	bool topoff_soc_enable;
++
++	int irq;
++	unsigned int alert_soc;
++	bool alert_masked;
++
++	/* Last open circuit voltage read, used to recover from a chip reset */
++	int ocv_uv;
++};
++
++static int sm5703_fg_raw_to_micro(unsigned int raw)
++{
++	/* 1/256 units to micro units: x * 1000000 / 256 */
++	return (raw & SM5703_FG_VALUE_MASK) * 15625 / 4;
++}
++
++static int sm5703_fg_read_uv(struct sm5703_fg *fg, unsigned int reg, int *uv)
++{
++	unsigned int raw;
++	int ret;
++
++	ret = regmap_read(fg->regmap, reg, &raw);
++	if (ret)
++		return ret;
++
++	*uv = sm5703_fg_raw_to_micro(raw);
++
++	return 0;
++}
++
++static int sm5703_fg_read_current(struct sm5703_fg *fg, int *ua)
++{
++	unsigned int raw;
++	int ret;
++
++	ret = regmap_read(fg->regmap, SM5703_FG_REG_CURRENT, &raw);
++	if (ret)
++		return ret;
++
++	/* Positive while charging, negative while discharging */
++	*ua = sm5703_fg_raw_to_micro(raw);
++	if (raw & SM5703_FG_SIGN)
++		*ua = -*ua;
++
++	return 0;
++}
++
++static int sm5703_fg_read_temp(struct sm5703_fg *fg, int *decidegc)
++{
++	unsigned int raw;
++	int ret;
++
++	ret = regmap_read(fg->regmap, SM5703_FG_REG_TEMPERATURE, &raw);
++	if (ret)
++		return ret;
++
++	*decidegc = (raw & SM5703_FG_TEMP_MASK) * 10 / 256;
++	if (raw & SM5703_FG_SIGN)
++		*decidegc = -*decidegc;
++
++	return 0;
++}
++
++static int sm5703_fg_read_soc(struct sm5703_fg *fg, int *soc)
++{
++	unsigned int raw;
++	int ret;
++
++	ret = regmap_read(fg->regmap, SM5703_FG_REG_SOC, &raw);
++	if (ret)
++		return ret;
++
++	/* The integer part is in the upper byte */
++	*soc = min(raw >> 8, 100U);
++
++	return 0;
++}
++
++static int sm5703_fg_init_needed(struct sm5703_fg *fg, bool *needed)
++{
++	unsigned int val;
++	int ret;
++
++	ret = regmap_read(fg->regmap, SM5703_FG_REG_OP_STATUS, &val);
++	if (ret)
++		return ret;
++
++	*needed = (val & SM5703_FG_OP_STATUS_INIT_MASK) !=
++		  SM5703_FG_OP_STATUS_INIT_DONE;
++
++	return 0;
++}
++
++/*
++ * Average of @n consecutive initial OCV samples starting at @reg with the
++ * largest and the smallest sample left out.
++ */
++static int sm5703_fg_iocv_avg(struct sm5703_fg *fg, unsigned int reg,
++			      unsigned int n, int *avg, int *spread)
++{
++	unsigned int val, hi = 0, lo = UINT_MAX, sum = 0;
++	unsigned int i;
++	int ret;
++
++	for (i = 0; i < n; i++) {
++		ret = regmap_read(fg->regmap, reg + i, &val);
++		if (ret)
++			return ret;
++
++		hi = max(hi, val);
++		lo = min(lo, val);
++		sum += val;
++	}
++
++	*avg = (sum - hi - lo) / (n - 2);
++	*spread = hi - lo;
++
++	return 0;
++}
++
++/* Pick the initial OCV the gauge measured at power up */
++static int sm5703_fg_calc_iocv(struct sm5703_fg *fg, unsigned int *iocv)
++{
++	int l_avg, l_spread, s_avg = 0, s_spread;
++	unsigned int val;
++	int ret;
++
++	ret = sm5703_fg_iocv_avg(fg, SM5703_FG_REG_IOCV_B_L(0), 8,
++				 &l_avg, &l_spread);
++	if (ret)
++		return ret;
++
++	ret = regmap_read(fg->regmap, SM5703_FG_REG_END_V_IDX, &val);
++	if (ret)
++		return ret;
++
++	if ((val & SM5703_FG_END_V_IDX_IOCV_S) == SM5703_FG_END_V_IDX_IOCV_S) {
++		ret = sm5703_fg_iocv_avg(fg, SM5703_FG_REG_IOCV_B_S(0), 4,
++					 &s_avg, &s_spread);
++		if (ret)
++			return ret;
++	}
++
++	if ((abs(l_avg - s_avg) > 0x29 && l_spread < 0x200) || !s_avg)
++		*iocv = l_avg;
++	else
++		*iocv = s_avg;
++
++	dev_dbg(fg->dev, "IOCV long 0x%04x (spread 0x%x), short 0x%04x\n",
++		l_avg, l_spread, s_avg);
++
++	return 0;
++}
++
++static int sm5703_fg_program(struct sm5703_fg *fg, bool after_reset)
++{
++	unsigned int iocv, cntl, status, i;
++	int ret;
++
++	for (i = 0; i < fg->num_params; i++) {
++		ret = regmap_write(fg->regmap, fg->params[i].reg,
++				   fg->params[i].val);
++		if (ret)
++			return ret;
++	}
++
++	cntl = SM5703_FG_CNTL_MIX_MODE | SM5703_FG_CNTL_TEMP_MEASURE |
++	       SM5703_FG_CNTL_MANUAL_OCV;
++	if (fg->topoff_soc_enable)
++		cntl |= SM5703_FG_CNTL_TOPOFF_SOC;
++
++	ret = regmap_write_bits(fg->regmap, SM5703_FG_REG_CNTL,
++				cntl | SM5703_FG_CNTL_TOPOFF_SOC, cntl);
++	if (ret)
++		return ret;
++
++	ret = regmap_write(fg->regmap, SM5703_FG_REG_PARAM_CTRL,
++			   SM5703_FG_PARAM_LOCK | (SM5703_FG_TABLE_LEN - 1));
++	if (ret)
++		return ret;
++
++	/*
++	 * After a spontaneous reset of the gauge the power up OCV samples are
++	 * meaningless, so seed it with the last OCV it reported instead.
++	 * The IOCV register counts in 1/2048 V.
++	 */
++	if (after_reset && fg->ocv_uv) {
++		iocv = (fg->ocv_uv / 1000) * 256 / 125;
++	} else {
++		ret = sm5703_fg_calc_iocv(fg, &iocv);
++		if (ret)
++			return ret;
++	}
++
++	ret = regmap_write(fg->regmap, SM5703_FG_REG_IOCV_MAN, iocv);
++	if (ret)
++		return ret;
++
++	ret = regmap_read(fg->regmap, SM5703_FG_REG_OP_STATUS, &status);
++	if (ret)
++		return ret;
++
++	dev_info(fg->dev,
++		 "programmed battery parameters, IOCV 0x%04x, status 0x%04x\n",
++		 iocv, status);
++
++	return 0;
++}
++
++static int sm5703_fg_hw_init(struct sm5703_fg *fg, bool after_reset)
++{
++	bool needed;
++	int ret;
++
++	ret = regmap_update_bits(fg->regmap, SM5703_FG_REG_CNTL,
++				 SM5703_FG_CNTL_TOPOFF_SOC,
++				 fg->topoff_soc_enable ?
++				 SM5703_FG_CNTL_TOPOFF_SOC : 0);
++	if (ret)
++		return ret;
++
++	ret = sm5703_fg_init_needed(fg, &needed);
++	if (ret)
++		return ret;
++
++	if (!needed) {
++		dev_dbg(fg->dev, "battery parameters already programmed\n");
++		return 0;
++	}
++
++	return sm5703_fg_program(fg, after_reset);
++}
++
++static int sm5703_fg_run_update(struct sm5703_fg *fg)
++{
++	int ret;
++
++	ret = regmap_write(fg->regmap, SM5703_FG_REG_PARAM_RUN_UPDATE, 0);
++	if (ret)
++		return ret;
++
++	return regmap_write(fg->regmap, SM5703_FG_REG_PARAM_RUN_UPDATE, 1);
++}
++
++static int sm5703_fg_mask_soc_alert(struct sm5703_fg *fg, bool mask)
++{
++	int ret;
++
++	ret = regmap_update_bits(fg->regmap, SM5703_FG_REG_INTFG_MASK,
++				 SM5703_FG_INT_L_SOC,
++				 mask ? SM5703_FG_INT_L_SOC : 0);
++	if (ret)
++		return ret;
++
++	fg->alert_masked = mask;
++
++	return 0;
++}
++
++/* Configure the low SoC alert, or silence all alerts without an interrupt */
++static int sm5703_fg_setup_alert(struct sm5703_fg *fg)
++{
++	unsigned int val;
++	int ret;
++
++	/* Reading INTFG clears pending alerts */
++	ret = regmap_read(fg->regmap, SM5703_FG_REG_INTFG, &val);
++	if (ret)
++		return ret;
++
++	if (!fg->irq) {
++		ret = regmap_write(fg->regmap, SM5703_FG_REG_INTFG_MASK,
++				   SM5703_FG_INT_ALL);
++		if (ret)
++			return ret;
++
++		return regmap_update_bits(fg->regmap, SM5703_FG_REG_CNTL,
++					  SM5703_FG_CNTL_ALARMS, 0);
++	}
++
++	ret = regmap_write(fg->regmap, SM5703_FG_REG_INTFG_MASK,
++			   SM5703_FG_INT_ALL & ~SM5703_FG_INT_L_SOC);
++	if (ret)
++		return ret;
++
++	fg->alert_masked = false;
++
++	ret = regmap_write(fg->regmap, SM5703_FG_REG_SOC_ALARM,
++			   fg->alert_soc << 8);
++	if (ret)
++		return ret;
++
++	ret = sm5703_fg_run_update(fg);
++	if (ret)
++		return ret;
++
++	return regmap_update_bits(fg->regmap, SM5703_FG_REG_CNTL,
++				  SM5703_FG_CNTL_ALARMS,
++				  SM5703_FG_CNTL_SOC_ALARM);
++}
++
++/*
++ * The gauge may reset spontaneously (e.g. on a supply surge). Detect that
++ * the same way the downstream driver does and program it again.
++ */
++static void sm5703_fg_check_reset(struct sm5703_fg *fg)
++{
++	unsigned int cntl;
++	bool needed;
++	int ret;
++
++	if (!fg->params)
++		return;
++
++	ret = sm5703_fg_init_needed(fg, &needed);
++	if (ret || !needed)
++		return;
++
++	ret = regmap_read(fg->regmap, SM5703_FG_REG_CNTL, &cntl);
++	if (ret || cntl != SM5703_FG_CNTL_RESET_VALUE)
++		return;
++
++	dev_warn(fg->dev, "fuel gauge was reset, reprogramming it\n");
++
++	ret = regmap_write(fg->regmap, SM5703_FG_REG_MISC,
++			   SM5703_FG_MISC_SW_RESET);
++	if (ret)
++		goto err;
++
++	msleep(200);
++
++	ret = sm5703_fg_hw_init(fg, true);
++	if (ret)
++		goto err;
++
++	ret = sm5703_fg_setup_alert(fg);
++	if (ret)
++		goto err;
++
++	return;
++err:
++	dev_err(fg->dev, "failed to reprogram fuel gauge: %d\n", ret);
++}
++
++static int sm5703_fg_get_capacity(struct sm5703_fg *fg, int *soc)
++{
++	int ret, ocv;
++
++	guard(mutex)(&fg->lock);
++
++	sm5703_fg_check_reset(fg);
++
++	ret = sm5703_fg_read_soc(fg, soc);
++	if (ret)
++		return ret;
++
++	if (!sm5703_fg_read_uv(fg, SM5703_FG_REG_OCV, &ocv))
++		fg->ocv_uv = ocv;
++
++	/* Re-arm the low SoC alert once the battery recovered */
++	if (fg->irq && fg->alert_masked && *soc > fg->alert_soc)
++		sm5703_fg_mask_soc_alert(fg, false);
++
++	return 0;
++}
++
++static int sm5703_fg_get_status(struct sm5703_fg *fg, int *status)
++{
++	int ret, ua, soc;
++
++	ret = sm5703_fg_read_current(fg, &ua);
++	if (ret)
++		return ret;
++
++	ret = sm5703_fg_read_soc(fg, &soc);
++	if (ret)
++		return ret;
++
++	if (ua > SM5703_FG_IDLE_CURRENT_UA)
++		*status = POWER_SUPPLY_STATUS_CHARGING;
++	else if (ua < -SM5703_FG_IDLE_CURRENT_UA)
++		*status = POWER_SUPPLY_STATUS_DISCHARGING;
++	else if (soc >= 100)
++		*status = POWER_SUPPLY_STATUS_FULL;
++	else
++		*status = POWER_SUPPLY_STATUS_NOT_CHARGING;
++
++	return 0;
++}
++
++static int sm5703_fg_get_property(struct power_supply *psy,
++				  enum power_supply_property psp,
++				  union power_supply_propval *val)
++{
++	struct sm5703_fg *fg = power_supply_get_drvdata(psy);
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_STATUS:
++		return sm5703_fg_get_status(fg, &val->intval);
++	case POWER_SUPPLY_PROP_PRESENT:
++		/* The gauge cannot detect the battery */
++		val->intval = 1;
++		return 0;
++	case POWER_SUPPLY_PROP_TECHNOLOGY:
++		val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
++		return 0;
++	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++		return sm5703_fg_read_uv(fg, SM5703_FG_REG_VOLTAGE,
++					 &val->intval);
++	case POWER_SUPPLY_PROP_VOLTAGE_OCV:
++		return sm5703_fg_read_uv(fg, SM5703_FG_REG_OCV, &val->intval);
++	case POWER_SUPPLY_PROP_CURRENT_NOW:
++		return sm5703_fg_read_current(fg, &val->intval);
++	case POWER_SUPPLY_PROP_CAPACITY:
++		return sm5703_fg_get_capacity(fg, &val->intval);
++	case POWER_SUPPLY_PROP_TEMP:
++		return sm5703_fg_read_temp(fg, &val->intval);
++	case POWER_SUPPLY_PROP_CAPACITY_ALERT_MIN:
++		val->intval = fg->alert_soc;
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++static int sm5703_fg_set_property(struct power_supply *psy,
++				  enum power_supply_property psp,
++				  const union power_supply_propval *val)
++{
++	struct sm5703_fg *fg = power_supply_get_drvdata(psy);
++	unsigned int old;
++	int ret;
++
++	if (psp != POWER_SUPPLY_PROP_CAPACITY_ALERT_MIN)
++		return -EINVAL;
++
++	if (val->intval < 1 || val->intval > 100)
++		return -EINVAL;
++
++	guard(mutex)(&fg->lock);
++
++	old = fg->alert_soc;
++	fg->alert_soc = val->intval;
++	ret = sm5703_fg_setup_alert(fg);
++	if (ret)
++		fg->alert_soc = old;
++
++	return ret;
++}
++
++static int sm5703_fg_property_is_writeable(struct power_supply *psy,
++					   enum power_supply_property psp)
++{
++	return psp == POWER_SUPPLY_PROP_CAPACITY_ALERT_MIN;
++}
++
++/* CAPACITY_ALERT_MIN must stay last, it is only exposed with an interrupt */
++static const enum power_supply_property sm5703_fg_props[] = {
++	POWER_SUPPLY_PROP_STATUS,
++	POWER_SUPPLY_PROP_PRESENT,
++	POWER_SUPPLY_PROP_TECHNOLOGY,
++	POWER_SUPPLY_PROP_VOLTAGE_NOW,
++	POWER_SUPPLY_PROP_VOLTAGE_OCV,
++	POWER_SUPPLY_PROP_CURRENT_NOW,
++	POWER_SUPPLY_PROP_CAPACITY,
++	POWER_SUPPLY_PROP_TEMP,
++	POWER_SUPPLY_PROP_CAPACITY_ALERT_MIN,
++};
++
++static irqreturn_t sm5703_fg_irq_handler(int irq, void *data)
++{
++	struct sm5703_fg *fg = data;
++	unsigned int intfg, status;
++	int ret;
++
++	/* Reading INTFG clears the alert */
++	ret = regmap_read(fg->regmap, SM5703_FG_REG_INTFG, &intfg);
++	if (ret)
++		return IRQ_NONE;
++
++	ret = regmap_read(fg->regmap, SM5703_FG_REG_STATUS, &status);
++	if (ret)
++		status = 0;
++
++	dev_dbg(fg->dev, "alert: INTFG 0x%04x, STATUS 0x%04x\n", intfg, status);
++
++	if (!(intfg & SM5703_FG_INT_ALL))
++		return IRQ_NONE;
++
++	if (intfg & SM5703_FG_INT_L_SOC) {
++		/* Keep quiet until the state of charge recovers */
++		scoped_guard(mutex, &fg->lock)
++			sm5703_fg_mask_soc_alert(fg, true);
++	}
++
++	power_supply_changed(fg->psy);
++
++	return IRQ_HANDLED;
++}
++
++static void sm5703_fg_add_reg(struct sm5703_fg_reg_val *seq,
++			      unsigned int *n, unsigned int reg, u16 val)
++{
++	seq[*n].reg = reg;
++	seq[*n].val = val;
++	(*n)++;
++}
++
++static int sm5703_fg_add_params(struct device *dev,
++				struct sm5703_fg_reg_val *seq, unsigned int *n,
++				const struct sm5703_fg_dt_param *params,
++				unsigned int num)
++{
++	u32 buf[SM5703_FG_TABLE_LEN];
++	unsigned int i, j;
++	int ret;
++
++	for (i = 0; i < num; i++) {
++		const struct sm5703_fg_dt_param *p = &params[i];
++
++		ret = device_property_count_u32(dev, p->name);
++		if (ret != p->count)
++			return dev_err_probe(dev, ret < 0 ? ret : -EINVAL,
++					     "invalid or missing %s\n", p->name);
++
++		ret = device_property_read_u32_array(dev, p->name, buf,
++						     p->count);
++		if (ret)
++			return dev_err_probe(dev, ret, "failed to read %s\n",
++					     p->name);
++
++		for (j = 0; j < p->count; j++) {
++			if (buf[j] > U16_MAX)
++				return dev_err_probe(dev, -EINVAL,
++						     "%s value out of range\n",
++						     p->name);
++
++			sm5703_fg_add_reg(seq, n, p->reg + j, buf[j]);
++		}
++	}
++
++	return 0;
++}
++
++static unsigned int
++sm5703_fg_count_params(const struct sm5703_fg_dt_param *params,
++		       unsigned int num)
++{
++	unsigned int i, count = 0;
++
++	for (i = 0; i < num; i++)
++		count += params[i].count;
++
++	return count;
++}
++
++/*
++ * Build the register sequence that programs the battery model. The order
++ * follows the downstream driver: unlock, RCE/DTCD/RS/VIT_PERIOD, unlock
++ * with table length, tables, mixing and calibration parameters.
++ */
++static int sm5703_fg_parse_params(struct sm5703_fg *fg)
++{
++	struct device *dev = fg->dev;
++	struct sm5703_fg_reg_val *seq;
++	unsigned int count, n = 0;
++	int ret;
++
++	if (!device_property_present(dev, "siliconmitus,battery-table-0")) {
++		dev_dbg(dev, "no battery parameters\n");
++		return 0;
++	}
++
++	count = 2 + sm5703_fg_count_params(sm5703_fg_params_pre,
++					   ARRAY_SIZE(sm5703_fg_params_pre)) +
++		sm5703_fg_count_params(sm5703_fg_params_post,
++				       ARRAY_SIZE(sm5703_fg_params_post));
++
++	seq = devm_kcalloc(dev, count, sizeof(*seq), GFP_KERNEL);
++	if (!seq)
++		return -ENOMEM;
++
++	sm5703_fg_add_reg(seq, &n, SM5703_FG_REG_PARAM_CTRL,
++			  SM5703_FG_PARAM_UNLOCK);
++
++	ret = sm5703_fg_add_params(dev, seq, &n, sm5703_fg_params_pre,
++				   ARRAY_SIZE(sm5703_fg_params_pre));
++	if (ret)
++		return ret;
++
++	sm5703_fg_add_reg(seq, &n, SM5703_FG_REG_PARAM_CTRL,
++			  SM5703_FG_PARAM_UNLOCK | (SM5703_FG_TABLE_LEN - 1));
++
++	ret = sm5703_fg_add_params(dev, seq, &n, sm5703_fg_params_post,
++				   ARRAY_SIZE(sm5703_fg_params_post));
++	if (ret)
++		return ret;
++
++	fg->params = seq;
++	fg->num_params = n;
++	fg->topoff_soc_enable =
++		device_property_read_bool(dev, "siliconmitus,topoff-soc-enable");
++
++	return 0;
++}
++
++static bool sm5703_fg_precious_reg(struct device *dev, unsigned int reg)
++{
++	return reg == SM5703_FG_REG_INTFG;
++}
++
++static const struct regmap_config sm5703_fg_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 16,
++	.val_format_endian = REGMAP_ENDIAN_LITTLE,
++	.max_register = SM5703_FG_REG_TABLE(SM5703_FG_NUM_TABLES - 1,
++					    SM5703_FG_TABLE_LEN - 1),
++	.precious_reg = sm5703_fg_precious_reg,
++};
++
++static void sm5703_fg_disable_wakeup(void *data)
++{
++	struct device *dev = data;
++
++	dev_pm_clear_wake_irq(dev);
++	device_init_wakeup(dev, false);
++}
++
++static int sm5703_fg_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct power_supply_config psy_cfg = {};
++	struct sm5703_fg *fg;
++	unsigned int id;
++	int ret;
++
++	fg = devm_kzalloc(dev, sizeof(*fg), GFP_KERNEL);
++	if (!fg)
++		return -ENOMEM;
++
++	fg->dev = dev;
++	fg->irq = client->irq > 0 ? client->irq : 0;
++	fg->alert_soc = SM5703_FG_DEFAULT_ALERT_SOC;
++
++	ret = devm_mutex_init(dev, &fg->lock);
++	if (ret)
++		return ret;
++
++	fg->regmap = devm_regmap_init_i2c(client, &sm5703_fg_regmap_config);
++	if (IS_ERR(fg->regmap))
++		return dev_err_probe(dev, PTR_ERR(fg->regmap),
++				     "failed to initialise regmap\n");
++
++	ret = regmap_read(fg->regmap, SM5703_FG_REG_DEVICE_ID, &id);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to read device ID\n");
++
++	dev_dbg(dev, "device ID 0x%04x\n", id);
++
++	ret = sm5703_fg_parse_params(fg);
++	if (ret)
++		return ret;
++
++	if (fg->params) {
++		ret = sm5703_fg_hw_init(fg, false);
++		if (ret)
++			return dev_err_probe(dev, ret,
++					     "failed to initialise fuel gauge\n");
++	} else {
++		bool needed;
++
++		ret = sm5703_fg_init_needed(fg, &needed);
++		if (ret)
++			return ret;
++
++		if (needed)
++			dev_warn(dev,
++				 "fuel gauge is not initialised and no battery parameters are available\n");
++	}
++
++	sm5703_fg_read_uv(fg, SM5703_FG_REG_OCV, &fg->ocv_uv);
++
++	ret = sm5703_fg_setup_alert(fg);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to configure alerts\n");
++
++	fg->desc.name = "sm5703-fuel-gauge";
++	fg->desc.type = POWER_SUPPLY_TYPE_BATTERY;
++	fg->desc.properties = sm5703_fg_props;
++	fg->desc.num_properties = ARRAY_SIZE(sm5703_fg_props);
++	if (!fg->irq)
++		fg->desc.num_properties--;
++	fg->desc.get_property = sm5703_fg_get_property;
++	fg->desc.set_property = sm5703_fg_set_property;
++	fg->desc.property_is_writeable = sm5703_fg_property_is_writeable;
++
++	psy_cfg.drv_data = fg;
++	psy_cfg.fwnode = dev_fwnode(dev);
++
++	fg->psy = devm_power_supply_register(dev, &fg->desc, &psy_cfg);
++	if (IS_ERR(fg->psy))
++		return dev_err_probe(dev, PTR_ERR(fg->psy),
++				     "failed to register power supply\n");
++
++	if (fg->irq) {
++		ret = devm_request_threaded_irq(dev, fg->irq, NULL,
++						sm5703_fg_irq_handler,
++						IRQF_ONESHOT, dev_name(dev), fg);
++		if (ret)
++			return dev_err_probe(dev, ret,
++					     "failed to request interrupt\n");
++
++		device_init_wakeup(dev, true);
++		ret = dev_pm_set_wake_irq(dev, fg->irq);
++		if (ret)
++			dev_warn(dev, "failed to set wake interrupt: %d\n", ret);
++
++		ret = devm_add_action_or_reset(dev, sm5703_fg_disable_wakeup,
++					       dev);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
++static const struct of_device_id sm5703_fg_of_match[] = {
++	{ .compatible = "siliconmitus,sm5703-fuel-gauge" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, sm5703_fg_of_match);
++
++static const struct i2c_device_id sm5703_fg_id[] = {
++	{ "sm5703-fuel-gauge" },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, sm5703_fg_id);
++
++static struct i2c_driver sm5703_fg_driver = {
++	.driver = {
++		.name = "sm5703-fuel-gauge",
++		.of_match_table = sm5703_fg_of_match,
++	},
++	.probe = sm5703_fg_probe,
++	.id_table = sm5703_fg_id,
++};
++module_i2c_driver(sm5703_fg_driver);
++
++MODULE_DESCRIPTION("Silicon Mitus SM5703 fuel gauge driver");
++MODULE_LICENSE("GPL");
+-- 
+2.56.0
+
