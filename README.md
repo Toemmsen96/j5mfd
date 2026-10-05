@@ -60,6 +60,7 @@ Hardware facts come from the downstream Samsung kernel for j5lte
 | `patches/0017-drm-msm-dsi-28nm-lp-PHY-Use-vendor-D-PHY-timings-at-*.patch` | Test: vendor D-PHY timings for this panel's 500 Mbit/s rate instead of the computed ones (display noise experiment) |
 | `patches/0018-drm-panel-samsung-s6e8aa5x01-ams497hy01-Use-an-integ*.patch` | Pixel clock 83.2 MHz so the DSI PLL runs in integer mode (26 x 19.2 MHz), 59.85 Hz (display noise experiment) |
 | `patches/0019-drm-msm-dsi-28nm-lp-PHY-Program-MSM8916-lane-deskew-*.patch` | msm8916 DSI PHY: vendor per-lane deskew values (LN_CFG_4) and BIST control block (display noise fix candidate) |
+| `patches/0020-drm-panel-samsung-s6e8aa5x01-ams497hy01-Put-mDNIe-in*.patch` | Panel init puts the DDIC's mDNIe image enhancer into bypass mode (vendor tables), candidate fix for the right-side grey noise |
 | `kernel/` | The new source files as plain files, for reading or reuse |
 | `pmaports/apply.sh` | Installs the patches and kernel config options into pmaports |
 | `pmaports/kconfig.fragment` | `CONFIG_MFD_SM5703=m`, `CONFIG_REGULATOR_SM5703=m`, `CONFIG_GP2AP002=m`, `CONFIG_BATTERY_SM5703=m`, `CONFIG_VIDEO_S5K5E3=m`, `CONFIG_CHARGER_SM5703=m`, `CONFIG_INTERCONNECT_QCOM=y`, `CONFIG_INTERCONNECT_QCOM_MSM8916=y` |
@@ -166,7 +167,11 @@ gsettings set org.gnome.shell.keybindings toggle-application-view "['<Super>a', 
   additionally applies the vendor D-PHY timing values (clearly less noise,
   some remains around busy UI); patch 18 moves the DSI PLL to integer mode
   (no change); patch 19 adds the vendor per-lane deskew values that
-  mainline zeroes (being tested).
+  mainline zeroes (no change: the PHY now matches the vendor exactly, so
+  the link is not the cause). The symptoms (right part only, worse with
+  motion, around UI edges, clean screenshots) match the panel's own mDNIe
+  image enhancer running in its reset state; patch 20 programs the vendor
+  bypass tables at init (being tested).
 - Patches 11 and 12 (charger status): compile-tested, not yet run on
   hardware. On a PC USB port the battery current hovers around zero, so
   without them the status flips between Charging and Discharging every few
