@@ -1,7 +1,7 @@
-From 6979c7c633699c2c422560ca1d92f22a97874779 Mon Sep 17 00:00:00 2001
+From 292157d4d6e7690eec82258b56a7b2a7f63d1d3c Mon Sep 17 00:00:00 2001
 From: Toemmsen96 <147745097+Toemmsen96@users.noreply.github.com>
 Date: Mon, 5 Oct 2026 17:41:58 +0200
-Subject: [PATCH 4/4] arm64: dts: qcom: msm8916-samsung-j5: Add vibrator, touch
+Subject: [PATCH 4/5] arm64: dts: qcom: msm8916-samsung-j5: Add vibrator, touch
  keys and proximity sensor
 
 With the SM5703 regulators available, describe the remaining input
@@ -24,7 +24,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
  1 file changed, 122 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts b/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts
-index 6d1fd95b0..c02dace5f 100644
+index 6d1fd95b0..fcb96070c 100644
 --- a/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts
 +++ b/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts
 @@ -8,6 +8,70 @@ / {
@@ -51,7 +51,7 @@ index 6d1fd95b0..c02dace5f 100644
 +		#size-cells = <0>;
 +
 +		touchkey@20 {
-+			compatible = "coreriver,tc360-touchkey";
++			compatible = "coreriver,tc300k-touchkey";
 +			reg = <0x20>;
 +
 +			interrupts-extended = <&tlmm 98 IRQ_TYPE_EDGE_FALLING>;

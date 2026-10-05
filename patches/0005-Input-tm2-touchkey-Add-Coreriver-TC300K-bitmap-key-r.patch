@@ -1,0 +1,122 @@
+From 112fd66f02d2ef71f9eac5bf8ff28a15508938e2 Mon Sep 17 00:00:00 2001
+From: Toemmsen96 <147745097+Toemmsen96@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 18:19:13 +0200
+Subject: [PATCH 5/5] Input: tm2-touchkey - Add Coreriver TC300K bitmap key
+ reporting
+
+Real Coreriver TC300K/TC350K/TC360 touch key controllers, as found in
+the Samsung Galaxy J5 (2015), report keys as a bitmap in register 0x00:
+one press bit per key in the low nibble and one release bit per key in
+the high nibble. The existing "coreriver,tc360-touchkey" variant is used
+by boards whose MCU emulates the TM2 protocol (key index plus a release
+flag), so on the J5 presses were delivered but every release was dropped
+with "invalid keycode index -1", leaving keys stuck.
+
+Add a "coreriver,tc300k-touchkey" variant that decodes the bitmap. The
+LED commands and power handling are the same as for the TC360 variant.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../bindings/input/cypress,tm2-touchkey.yaml  |  1 +
+ drivers/input/keyboard/tm2-touchkey.c         | 45 +++++++++++++++++++
+ 2 files changed, 46 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/input/cypress,tm2-touchkey.yaml b/Documentation/devicetree/bindings/input/cypress,tm2-touchkey.yaml
+index 52dca8b64..67be02ed0 100644
+--- a/Documentation/devicetree/bindings/input/cypress,tm2-touchkey.yaml
++++ b/Documentation/devicetree/bindings/input/cypress,tm2-touchkey.yaml
+@@ -24,6 +24,7 @@ properties:
+       - cypress,midas-touchkey
+       - cypress,aries-touchkey
+       - coreriver,tc360-touchkey
++      - coreriver,tc300k-touchkey
+ 
+   reg:
+     maxItems: 1
+diff --git a/drivers/input/keyboard/tm2-touchkey.c b/drivers/input/keyboard/tm2-touchkey.c
+index 55d699d90..c5f23dfef 100644
+--- a/drivers/input/keyboard/tm2-touchkey.c
++++ b/drivers/input/keyboard/tm2-touchkey.c
+@@ -30,6 +30,9 @@
+ #define TM2_TOUCHKEY_CMD_LED_OFF	0x20
+ #define TM2_TOUCHKEY_BIT_PRESS_EV	BIT(3)
+ #define TM2_TOUCHKEY_BIT_KEYCODE	GENMASK(2, 0)
++#define TC300K_TOUCHKEY_PRESS_MASK	GENMASK(3, 0)
++#define TC300K_TOUCHKEY_RELEASE_MASK	GENMASK(7, 4)
++#define TC300K_TOUCHKEY_RELEASE_SHIFT	4
+ #define TM2_TOUCHKEY_LED_VOLTAGE_MIN	2500000
+ #define TM2_TOUCHKEY_LED_VOLTAGE_MAX	3300000
+ 
+@@ -40,6 +43,12 @@ struct touchkey_variant {
+ 	u8 cmd_led_off;
+ 	bool no_reg;
+ 	bool fixed_regulator;
++	/*
++	 * Key register is a bitmap: one press bit per key in the low nibble
++	 * and one release bit per key in the high nibble (Coreriver TC300K
++	 * family), instead of a key index plus a release flag.
++	 */
++	bool key_bitmap;
+ };
+ 
+ struct tm2_touchkey_data {
+@@ -82,6 +91,15 @@ static const struct touchkey_variant tc360_touchkey_variant = {
+ 	.cmd_led_off = TM2_TOUCHKEY_CMD_LED_OFF,
+ };
+ 
++static const struct touchkey_variant tc300k_touchkey_variant = {
++	.keycode_reg = 0x00,
++	.base_reg = 0x00,
++	.fixed_regulator = true,
++	.key_bitmap = true,
++	.cmd_led_on = TM2_TOUCHKEY_CMD_LED_ON,
++	.cmd_led_off = TM2_TOUCHKEY_CMD_LED_OFF,
++};
++
+ static int tm2_touchkey_led_brightness_set(struct led_classdev *led_dev,
+ 					    enum led_brightness brightness)
+ {
+@@ -148,6 +166,30 @@ static irqreturn_t tm2_touchkey_irq_handler(int irq, void *devid)
+ 		goto out;
+ 	}
+ 
++	if (touchkey->variant->key_bitmap) {
++		unsigned int pressed = data & TC300K_TOUCHKEY_PRESS_MASK;
++		unsigned int released = (data & TC300K_TOUCHKEY_RELEASE_MASK) >>
++					TC300K_TOUCHKEY_RELEASE_SHIFT;
++
++		for (i = 0; i < touchkey->num_keycodes; i++) {
++			if (pressed & BIT(i)) {
++				input_event(touchkey->input_dev, EV_MSC, MSC_SCAN, i);
++				input_report_key(touchkey->input_dev,
++						 touchkey->keycodes[i], 1);
++			} else if (released & BIT(i)) {
++				input_event(touchkey->input_dev, EV_MSC, MSC_SCAN, i);
++				input_report_key(touchkey->input_dev,
++						 touchkey->keycodes[i], 0);
++			}
++		}
++		input_sync(touchkey->input_dev);
++
++		/* a release turns the backlight on, same as the press flag below */
++		if (released)
++			data |= TM2_TOUCHKEY_BIT_PRESS_EV;
++		goto out;
++	}
++
+ 	index = (data & TM2_TOUCHKEY_BIT_KEYCODE) - 1;
+ 	if (index < 0 || index >= touchkey->num_keycodes) {
+ 		dev_warn(&touchkey->client->dev,
+@@ -344,6 +386,9 @@ static const struct of_device_id tm2_touchkey_of_match[] = {
+ 	}, {
+ 		.compatible = "coreriver,tc360-touchkey",
+ 		.data = &tc360_touchkey_variant,
++	}, {
++		.compatible = "coreriver,tc300k-touchkey",
++		.data = &tc300k_touchkey_variant,
+ 	},
+ 	{ },
+ };
+-- 
+2.56.0
+

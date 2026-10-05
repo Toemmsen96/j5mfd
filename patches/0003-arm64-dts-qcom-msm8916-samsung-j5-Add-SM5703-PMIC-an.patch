@@ -1,7 +1,7 @@
 From 8ee81ca0aba6d749e1a4e37b0ac53844e2c6f12c Mon Sep 17 00:00:00 2001
 From: Toemmsen96 <147745097+Toemmsen96@users.noreply.github.com>
 Date: Mon, 5 Oct 2026 16:52:25 +0200
-Subject: [PATCH 3/4] arm64: dts: qcom: msm8916-samsung-j5: Add SM5703 PMIC and
+Subject: [PATCH 3/5] arm64: dts: qcom: msm8916-samsung-j5: Add SM5703 PMIC and
  enable touchscreen
 
 The Galaxy J5 (2015) powers its Imagis IST3038C touchscreen from LDO3 of

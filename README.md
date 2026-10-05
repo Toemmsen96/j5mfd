@@ -17,7 +17,8 @@ them into a pmbootstrap checkout so the stock postmarketOS kernel package
 | `patches/0001-mfd-sm5703-*.patch` | SM5703 PMIC core driver, register header, device-tree binding |
 | `patches/0002-regulator-sm5703-*.patch` | Regulator driver: 3 LDOs, buck, 2 USB LDOs |
 | `patches/0003-arm64-dts-qcom-msm8916-samsung-j5-Add-SM5703-*.patch` | J5 device tree: PMIC on BLSP I2C6, LDO3 feeds the touchscreen, touchscreen bus enabled |
-| `patches/0004-arm64-dts-qcom-msm8916-samsung-j5-Add-vibrator-*.patch` | J5 device tree: vibrator (SM5703 LDO2), TC360 touch keys, GP2AP002 proximity sensor |
+| `patches/0004-arm64-dts-qcom-msm8916-samsung-j5-Add-vibrator-*.patch` | J5 device tree: vibrator (SM5703 LDO2), Coreriver touch keys, GP2AP002 proximity sensor |
+| `patches/0005-Input-tm2-touchkey-*.patch` | tm2-touchkey driver: decode the Coreriver TC300K press/release bitmap the J5's key controller reports |
 | `kernel/` | The new source files as plain files, for reading or reuse |
 | `pmaports/apply.sh` | Installs the patches and kernel config options into pmaports |
 | `pmaports/kconfig.fragment` | `CONFIG_MFD_SM5703=m`, `CONFIG_REGULATOR_SM5703=m`, `CONFIG_GP2AP002=m` |
@@ -72,7 +73,8 @@ phone over the USB network instead of reflashing:
 pmaports/apply.sh
 pmbootstrap build --force linux-postmarketos-qcom-msm8916
 pmbootstrap sideload linux-postmarketos-qcom-msm8916
-ssh 172.16.42.1 sudo reboot
+ssh 172.16.42.1 # This is the address of the phone over USB
+sudo reboot
 ```
 
 ## Status
@@ -85,10 +87,12 @@ ssh 172.16.42.1 sudo reboot
   tables, reset polarity, bus wiring, regulator constraints): no issues.
 - Tested on an SM-J500F running postmarketOS v26.06 (GNOME Mobile): the
   touchscreen works.
-- Patch 4 (vibrator, touch keys, proximity sensor) builds but is not yet
-  tested on hardware. Check with `evtest` (touch keys report KEY_APPSELECT
-  and KEY_BACK), `fftest` or a GNOME haptic event (vibrator), and
-  `iio_info` or `/sys/bus/iio/devices/` (proximity events).
+- Patch 4 on hardware: the vibrator, touch keys and proximity sensor all
+  probe. The touch keys needed patch 5: without it the J5's controller
+  delivers presses but every release is dropped ("invalid keycode index
+  -1"). Proximity events still to be confirmed (enable
+  `in_proximity_thresh_either_en` under the gp2ap002 IIO device and watch
+  the event fd, or use `iio_event_monitor`).
 
 ## Note on flashing
 
