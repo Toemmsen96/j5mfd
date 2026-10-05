@@ -1,0 +1,39 @@
+From c6d2b91fd76d78277354ee8559622bceda3641e1 Mon Sep 17 00:00:00 2001
+From: Toemmsen96 <147745097+Toemmsen96@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 21:37:49 +0200
+Subject: [PATCH] drm/panel: samsung-s6e8aa5x01-ams497hy01: Use an integer-mode
+ DSI clock
+
+Lower the pixel clock from 83.398 MHz to 83.2 MHz so that the DSI bit
+clock is exactly 26 x 19.2 MHz (499.2 Mbit/s per lane). The 28nm DSI PLL
+then runs in integer mode instead of fractional sigma-delta mode, which
+reduces link jitter; the panel's refresh rate becomes 59.85 Hz. Part of
+the Galaxy J5 (2015) display noise investigation.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../panel-samsung-s6e8aa5x01-ams497hy01.c                 | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/panel/msm8916-generated/panel-samsung-s6e8aa5x01-ams497hy01.c b/drivers/gpu/drm/panel/msm8916-generated/panel-samsung-s6e8aa5x01-ams497hy01.c
+index 999ff8155..ee22cef89 100644
+--- a/drivers/gpu/drm/panel/msm8916-generated/panel-samsung-s6e8aa5x01-ams497hy01.c
++++ b/drivers/gpu/drm/panel/msm8916-generated/panel-samsung-s6e8aa5x01-ams497hy01.c
+@@ -982,7 +982,13 @@ static int s6e8aa5x01_ams497hy01_unprepare(struct drm_panel *panel)
+ }
+ 
+ static const struct drm_display_mode s6e8aa5x01_ams497hy01_mode = {
+-	.clock = (720 + 226 + 20 + 100) * (1280 + 14 + 2 + 8) * 60 / 1000,
++	/*
++	 * 83.2 MHz instead of the nominal 83.398 MHz (60 Hz): with 24 bpp on
++	 * 4 lanes this is a DSI bit clock of exactly 26 x 19.2 MHz, so the
++	 * DSI PLL runs in integer mode instead of fractional (sigma-delta)
++	 * mode, which lowers link jitter. Refresh rate becomes 59.85 Hz.
++	 */
++	.clock = 83200,
+ 	.hdisplay = 720,
+ 	.hsync_start = 720 + 226,
+ 	.hsync_end = 720 + 226 + 20,
+-- 
+2.56.0
+
