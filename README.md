@@ -39,9 +39,8 @@ sudo pacman -S pmbootstrap android-tools      # Arch / CachyOS
 pmbootstrap init                              # channel v26.06, vendor samsung, device j5
 pmaports/apply.sh                             # copies patches, bumps pkgrel, updates config, runs checksum
 pmbootstrap build --force linux-postmarketos-qcom-msm8916
-pmbootstrap install --ssh-keys                # bakes ~/.ssh/*.pub into the image
-pmbootstrap flasher flash_kernel
-pmbootstrap flasher flash_rootfs
+pmbootstrap install                           # ssh keys are copied if enabled in init
+pmbootstrap flasher flash_rootfs              # flash_kernel fails on the J5, see below
 fastboot reboot
 ```
 
@@ -71,4 +70,14 @@ evtest                                           # pick the IST3038C device, tou
   the touchscreen bus is enabled.
 - Reviewed against the downstream Samsung sources (register map, voltage
   tables, reset polarity, bus wiring, regulator constraints): no issues.
-- Not yet tested on hardware: the phone needs reflashing first.
+- Tested on an SM-J500F running postmarketOS v26.06 (GNOME Mobile): the
+  touchscreen works.
+
+## Note on flashing
+
+The J5's boot partition is only 12.5 MB, so `pmbootstrap flasher
+flash_kernel` fails with "size too large" (the systemd initramfs alone is
+14 MB). That is harmless: lk2nd looks for `/extlinux/extlinux.conf` on
+any ext2 partition larger than 16 MiB before falling back to a boot
+image, and the pmOS rootfs image flashed to userdata carries exactly
+that, so the kernel boots from there. Flash the rootfs and reboot.
