@@ -26,6 +26,7 @@ them into a pmbootstrap checkout so the stock postmarketOS kernel package
 | `patches/0010-arm64-dts-qcom-msm8916-samsung-j5-Enable-front-camer*.patch` | J5 device tree: CCI and camss enabled, front sensor on CCI at 0x10 with MCLK1, reset GPIO 28, core enable GPIO 33 |
 | `patches/0011-power-supply-Add-SM5703-charger-status-driver.patch` | Read-only SM5703 charger power supply (VBUS present, charging/full state, configured currents), polled every 5 s |
 | `patches/0012-power-supply-sm5703-fuel-gauge-Derive-status-from-th*.patch` | Fuel gauge takes Charging/Discharging from the charger instead of the near-zero battery current |
+| `patches/0013-drm-panel-samsung-s6e8aa5x01-ams497hy01-Add-brightne*.patch` | Brightness control for the AMOLED panel: backlight device, Samsung smart-dimming gamma from the panel's MTP data, AID/ELVSS/ACL per level (62 steps, 5 to 360 cd) |
 | `kernel/` | The new source files as plain files, for reading or reuse |
 | `pmaports/apply.sh` | Installs the patches and kernel config options into pmaports |
 | `pmaports/kconfig.fragment` | `CONFIG_MFD_SM5703=m`, `CONFIG_REGULATOR_SM5703=m`, `CONFIG_GP2AP002=m`, `CONFIG_BATTERY_SM5703=m`, `CONFIG_VIDEO_S5K5E3=m`, `CONFIG_CHARGER_SM5703=m` |
@@ -115,6 +116,8 @@ gsettings set org.gnome.shell.keybindings toggle-application-view "['<Super>a', 
   Before them the phone exposed no power_supply device at all. The driver
   programs the Samsung battery tables only when the chip has lost them
   (removable battery pulled); on this phone they were still present.
+- Patch 13 (brightness): compile-tested, not yet run on hardware. Before it
+  there is no backlight device at all, which is the wiki's "screen partial".
 - Patches 11 and 12 (charger status): compile-tested, not yet run on
   hardware. On a PC USB port the battery current hovers around zero, so
   without them the status flips between Charging and Discharging every few
@@ -125,7 +128,8 @@ gsettings set org.gnome.shell.keybindings toggle-application-view "['<Super>a', 
   (`cam -l`). The rear camera (S5K3L2XX, 4 lanes, autofocus) is not started.
 - Still open on the wiki's list: camera (no mainline support for these
   sensors), battery (SM5703 fuel gauge at a separate I2C address, no
-  mainline driver, now addressed by patches 6/7), USB OTG (needs the SM5703 VBUS boost), accelerometer
+  mainline driver, now addressed by patches 6/7), screen brightness (patch
+  13), USB OTG (needs the SM5703 VBUS boost), accelerometer
   mount matrix (needs testing by rotating the phone).
 
 ## Note on flashing

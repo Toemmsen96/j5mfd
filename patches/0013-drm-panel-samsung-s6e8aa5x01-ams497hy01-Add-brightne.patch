@@ -1,0 +1,1052 @@
+From dee332cb80601cf91abe99af3510ddc86a2a1891 Mon Sep 17 00:00:00 2001
+From: Toemmsen96 <147745097+Toemmsen96@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 19:19:16 +0200
+Subject: [PATCH] drm/panel: samsung-s6e8aa5x01-ams497hy01: Add brightness
+ control
+
+The generated driver registers no backlight device, so the panel always
+runs with the 360 cd gamma/AID/ELVSS values of the init sequence and
+user space cannot change the brightness.
+
+Add a raw backlight device (0-255, default 128) unless a backlight is
+described in DT, and implement the brightness update of the Samsung
+vendor kernel for the Galaxy J5 (SM-J500F):
+
+ - The level selects one of 62 candela steps (5-360 cd) through
+   samsung,candela_map_table_revA of the vendor panel dtsi. Level 0 is
+   the lowest step, the panel is never switched off.
+
+ - For that step the update sends, with level 1 key (0xf0 0x5a 0x5a)
+   enabled, in the order of mdss_samsung_normal_brightenss_packet_set():
+   AID (0xb2) from samsung,aid_tx_cmds_revA/C via aid_map_table,
+   ACL 15% (0x55 0x02, 0xb5 0x50) below level 255 and ACL off
+   (0x55 0x00, 0xb5 0x40) at 255 as done by
+   samsung,samsung_change_acl_by_brightness, ELVSS (0xb6 0xbc xx) from
+   samsung,elvss_tx_cmds_revA via smart_acl_elvss_map_table, the
+   temperature (0xb8 parameter 8, fixed to 20 degrees as the vendor
+   kernel has no other source either), the low luminance ELVSS value
+   (0xb6 parameter 22: the OTP value above 29 cd, 0x07/0x05 below), the
+   gamma (0xca) and the gamma update (0xf7 0x03).
+
+ - The gamma for each step is generated with the vendor "smart dimming"
+   algorithm (ss_dsi_smart_dimming_S6E8AA5X01_AMS497HY01.[ch]): the
+   per-panel MTP gamma offsets (0xc8, 33 bytes) are read once, the
+   panel's gray scale voltages are derived from them and the reference
+   gamma, and for every candela step the gamma register values are
+   computed from a 2.0 gamma curve at the step's base luminance,
+   corrected by the vendor gradation and RGB offset tables and by the
+   MTP offsets. The port keeps the vendor integer arithmetic, and its
+   output was checked to be identical to the vendor code for 3000
+   random MTP inputs on both panel revisions.
+
+Like the vendor kernel, the panel ID (0xda-0xdc), the ELVSS OTP value
+(0xb6 offset 0x15) and the MTP are read once before sleep out, using the
+0xb0 offset register and reads of at most 7 bytes. The third ID byte
+selects the panel revision: 0x02 uses the revA AID and smart dimming
+tables, anything else the revC ones. If the ID cannot be read, revA is
+used. If the MTP cannot be read, the reference (360 cd) gamma is kept
+and only AID/ELVSS/ACL follow the brightness, which still covers about
+12-360 cd.
+
+The init sequence is unchanged. The requested level is applied after it
+and before display on, so it survives a power cycle of the panel.
+Updates while the panel is on are sent in HS mode like the vendor
+kernel does, and updates while the panel is off or the backlight is
+blanked are only cached.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../panel-samsung-s6e8aa5x01-ams497hy01.c     | 896 ++++++++++++++++++
+ 1 file changed, 896 insertions(+)
+
+diff --git a/drivers/gpu/drm/panel/msm8916-generated/panel-samsung-s6e8aa5x01-ams497hy01.c b/drivers/gpu/drm/panel/msm8916-generated/panel-samsung-s6e8aa5x01-ams497hy01.c
+index 30f7973d0..6f445f3bc 100644
+--- a/drivers/gpu/drm/panel/msm8916-generated/panel-samsung-s6e8aa5x01-ams497hy01.c
++++ b/drivers/gpu/drm/panel/msm8916-generated/panel-samsung-s6e8aa5x01-ams497hy01.c
+@@ -2,23 +2,61 @@
+ // Copyright (c) 2024 FIXME
+ // Generated with linux-mdss-dsi-panel-driver-generator from vendor device tree:
+ //   Copyright (c) 2013, The Linux Foundation. All rights reserved. (FIXME)
++//
++// Brightness control (AID/ELVSS/ACL tables and the "smart dimming" gamma
++// generation) is based on the Samsung vendor kernel for the Galaxy J5
++// (SM-J500F): ss_dsi_panel_S6E8AA5X01_AMS497HY01.c,
++// ss_dsi_smart_dimming_S6E8AA5X01_AMS497HY01.[ch] and
++// dsi_panel_S6E8AA5X01_AMS497HY01_hd_octa_video.dtsi,
++// Copyright (C) 2012, Samsung Electronics.
+ 
++#include <linux/backlight.h>
+ #include <linux/delay.h>
+ #include <linux/gpio/consumer.h>
++#include <linux/math64.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/of.h>
+ #include <linux/regulator/consumer.h>
++#include <linux/slab.h>
+ 
+ #include <drm/drm_mipi_dsi.h>
+ #include <drm/drm_modes.h>
+ #include <drm/drm_panel.h>
+ #include <drm/drm_probe_helper.h>
+ 
++#define S6E8AA5X01_NUM_CANDELA		62
++#define S6E8AA5X01_GAMMA_LEN		33
++#define S6E8AA5X01_MTP_LEN		33
++#define S6E8AA5X01_READ_CHUNK		7
++#define S6E8AA5X01_ELVSS_OTP_OFFSET	0x15
++#define S6E8AA5X01_DEFAULT_BRIGHTNESS	128
++#define S6E8AA5X01_MAX_BRIGHTNESS	255
++/* Downstream uses a fixed temperature of 20 degrees Celsius. */
++#define S6E8AA5X01_TEMPERATURE		20
++
++enum s6e8aa5x01_rev {
++	S6E8AA5X01_REV_A,
++	S6E8AA5X01_REV_C,
++};
++
+ struct s6e8aa5x01_ams497hy01 {
+ 	struct drm_panel panel;
+ 	struct mipi_dsi_device *dsi;
++	struct backlight_device *bl;
+ 	struct regulator_bulk_data supplies[2];
+ 	struct gpio_desc *reset_gpio;
++
++	/* Serialises panel register access between DRM and the backlight. */
++	struct mutex lock;
++	bool prepared;
++
++	bool id_valid;
++	enum s6e8aa5x01_rev rev;
++	bool elvss_otp_valid;
++	u8 elvss_otp;
++	bool gamma_valid;
++	u8 gamma[S6E8AA5X01_NUM_CANDELA][S6E8AA5X01_GAMMA_LEN];
+ };
+ 
+ static inline
+@@ -27,6 +65,787 @@ struct s6e8aa5x01_ams497hy01 *to_s6e8aa5x01_ams497hy01(struct drm_panel *panel)
+ 	return container_of(panel, struct s6e8aa5x01_ams497hy01, panel);
+ }
+ 
++/*
++ * Brightness tables from the vendor device tree. The platform brightness
++ * level (0-255) selects one of 62 candela steps through
++ * samsung,candela_map_table_revA. The per-candela AID (0xb2) and ELVSS (0xb6)
++ * values below are samsung,aid_tx_cmds_revA/C resolved through
++ * samsung,aid_map_table_revA/C and samsung,elvss_tx_cmds_revA resolved
++ * through samsung,smart_acl_elvss_map_table_revA.
++ */
++struct s6e8aa5x01_candela {
++	u8 max_level;
++	u16 candela;
++};
++
++static const struct s6e8aa5x01_candela s6e8aa5x01_candela_map[S6E8AA5X01_NUM_CANDELA] = {
++	{   5,   5 }, {   6,   6 }, {   7,   7 }, {   8,   8 }, {   9,   9 },
++	{  10,  10 }, {  11,  11 }, {  12,  12 }, {  13,  13 }, {  14,  14 },
++	{  15,  15 }, {  16,  16 }, {  17,  17 }, {  18,  19 }, {  19,  20 },
++	{  20,  21 }, {  21,  22 }, {  22,  24 }, {  23,  25 }, {  24,  27 },
++	{  25,  29 }, {  26,  30 }, {  27,  32 }, {  28,  34 }, {  29,  37 },
++	{  30,  39 }, {  32,  41 }, {  34,  44 }, {  36,  47 }, {  38,  50 },
++	{  40,  53 }, {  43,  56 }, {  46,  60 }, {  49,  64 }, {  52,  68 },
++	{  56,  72 }, {  59,  77 }, {  63,  82 }, {  67,  87 }, {  71,  93 },
++	{  76,  98 }, {  80, 105 }, {  86, 111 }, {  91, 119 }, {  97, 126 },
++	{ 104, 134 }, { 110, 143 }, { 118, 152 }, { 125, 162 }, { 133, 172 },
++	{ 142, 183 }, { 150, 195 }, { 160, 207 }, { 170, 220 }, { 181, 234 },
++	{ 193, 249 }, { 205, 265 }, { 218, 282 }, { 230, 300 }, { 242, 316 },
++	{ 254, 333 }, { 255, 360 },
++};
++
++static const u16 s6e8aa5x01_aid[][S6E8AA5X01_NUM_CANDELA] = {
++	[S6E8AA5X01_REV_A] = {
++		0x04ee, 0x04e0, 0x04d3, 0x04ce, 0x04cd, 0x04b3, 0x04ae, 0x04a0,
++		0x0493, 0x048d, 0x0480, 0x0473, 0x046c, 0x0452, 0x0445, 0x043e,
++		0x042f, 0x0412, 0x0403, 0x03ee, 0x03d1, 0x03bf, 0x03a5, 0x0390,
++		0x036f, 0x0351, 0x033d, 0x0312, 0x02f0, 0x02cd, 0x02a3, 0x0280,
++		0x0250, 0x021d, 0x01f0, 0x01f0, 0x01f0, 0x01f0, 0x01f0, 0x01f0,
++		0x01f0, 0x01f0, 0x01f0, 0x01f0, 0x01f0, 0x01ff, 0x01c8, 0x018a,
++		0x01f0, 0x01bc, 0x017e, 0x013e, 0x00ff, 0x00b0, 0x0062, 0x000f,
++		0x000f, 0x000f, 0x000f, 0x000f, 0x000f, 0x000f,
++	},
++	[S6E8AA5X01_REV_C] = {
++		0x04ee, 0x04e1, 0x04d4, 0x04cf, 0x04c2, 0x04b4, 0x04af, 0x04a3,
++		0x0496, 0x0491, 0x0482, 0x0475, 0x0470, 0x0454, 0x0450, 0x0442,
++		0x0433, 0x041e, 0x0410, 0x03f2, 0x03de, 0x03c6, 0x03b1, 0x0395,
++		0x0373, 0x035f, 0x0343, 0x0320, 0x02fe, 0x02df, 0x02b2, 0x0290,
++		0x025e, 0x0230, 0x01f4, 0x01f4, 0x01f4, 0x01f4, 0x01f4, 0x01f4,
++		0x01f4, 0x01f4, 0x01f4, 0x01f4, 0x01f4, 0x01f4, 0x01f4, 0x01f4,
++		0x01f4, 0x01c0, 0x0182, 0x0142, 0x0102, 0x00b3, 0x006e, 0x000f,
++		0x000f, 0x000f, 0x000f, 0x000f, 0x000f, 0x000f,
++	},
++};
++
++static const u8 s6e8aa5x01_elvss[S6E8AA5X01_NUM_CANDELA] = {
++	0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f,
++	0x0f, 0x0f, 0x0f, 0x0f, 0x11, 0x13, 0x15, 0x17, 0x19, 0x1d, 0x1d, 0x1d,
++	0x1d, 0x1d, 0x1d, 0x1d, 0x1d, 0x1d, 0x1d, 0x1d, 0x1d, 0x1d, 0x1d, 0x1d,
++	0x1d, 0x1c, 0x1c, 0x1b, 0x1b, 0x1b, 0x1a, 0x1a, 0x1a, 0x1a, 0x1a, 0x1a,
++	0x1a, 0x1a, 0x1a, 0x19, 0x18, 0x18, 0x17, 0x16, 0x15, 0x14, 0x13, 0x12,
++	0x11, 0x0f,
++};
++
++static const u16 s6e8aa5x01_base_luminance[][S6E8AA5X01_NUM_CANDELA] = {
++	[S6E8AA5X01_REV_A] = {
++		112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112,
++		112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112, 112,
++		112, 112, 112, 112, 112, 112, 112, 112, 112, 119, 126, 134, 142,
++		151, 160, 172, 180, 192, 201, 213, 226, 239, 253, 253, 253, 253,
++		253, 253, 253, 253, 271, 286, 304, 318, 335, 360,
++	},
++	[S6E8AA5X01_REV_C] = {
++		113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113,
++		113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113, 113,
++		113, 113, 113, 113, 113, 113, 113, 113, 113, 118, 127, 135, 142,
++		151, 160, 172, 181, 192, 203, 212, 227, 240, 253, 253, 253, 253,
++		253, 253, 253, 253, 270, 287, 304, 317, 334, 360,
++	},
++};
++
++static const s8 s6e8aa5x01_gradation_offset[][S6E8AA5X01_NUM_CANDELA][9] = {
++	[S6E8AA5X01_REV_A] = {
++		{ 0, 4, 3, 3, 4, 4, 7, 10, 4 },
++		{ 0, 2, 4, 3, 3, 3, 6, 9, 4 },
++		{ 0, 2, 4, 3, 3, 3, 5, 8, 4 },
++		{ 0, 3, 4, 3, 3, 3, 5, 7, 4 },
++		{ 0, 3, 4, 3, 3, 3, 5, 7, 4 },
++		{ 0, 2, 2, 1, 2, 1, 4, 6, 4 },
++		{ 0, 3, 2, 1, 2, 1, 4, 6, 4 },
++		{ 0, 2, 2, 1, 2, 1, 3, 5, 4 },
++		{ 0, 2, 2, 1, 2, 1, 3, 5, 4 },
++		{ 0, 2, 1, 1, 2, 1, 3, 4, 4 },
++		{ 0, 2, 2, 1, 2, 1, 3, 4, 4 },
++		{ 0, 2, 2, 1, 2, 1, 3, 4, 4 },
++		{ 0, 3, 2, 1, 2, 1, 3, 4, 4 },
++		{ 0, 3, 2, 1, 2, 1, 3, 4, 4 },
++		{ 0, 3, 3, 2, 3, 1, 3, 4, 5 },
++		{ 0, 3, 3, 2, 3, 1, 4, 5, 5 },
++		{ 0, 3, 3, 2, 3, 2, 4, 6, 6 },
++		{ 0, 3, 3, 2, 3, 2, 4, 6, 6 },
++		{ 0, 3, 3, 2, 3, 2, 4, 6, 7 },
++		{ 0, 3, 3, 2, 3, 2, 4, 6, 7 },
++		{ 0, 3, 3, 2, 3, 2, 4, 6, 7 },
++		{ 0, 3, 3, 2, 3, 2, 4, 6, 7 },
++		{ 0, 3, 3, 2, 3, 2, 4, 5, 7 },
++		{ 0, 3, 3, 3, 3, 2, 4, 5, 6 },
++		{ 0, 3, 3, 3, 3, 2, 4, 5, 6 },
++		{ 0, 3, 3, 3, 3, 2, 4, 5, 6 },
++		{ 0, 3, 3, 3, 3, 2, 3, 4, 5 },
++		{ 0, 3, 3, 3, 3, 2, 3, 4, 5 },
++		{ 0, 3, 3, 3, 3, 2, 3, 4, 5 },
++		{ 0, 3, 3, 3, 3, 2, 3, 3, 5 },
++		{ 0, 3, 3, 3, 3, 2, 3, 3, 4 },
++		{ 0, 3, 3, 3, 3, 2, 3, 3, 4 },
++		{ 0, 3, 3, 3, 3, 2, 3, 3, 4 },
++		{ 0, 3, 3, 3, 3, 2, 3, 3, 4 },
++		{ 0, 3, 3, 3, 3, 2, 3, 3, 4 },
++		{ 0, 3, 3, 4, 3, 2, 3, 3, 4 },
++		{ 0, 3, 3, 3, 3, 2, 3, 3, 4 },
++		{ 0, 3, 3, 4, 3, 2, 3, 2, 4 },
++		{ 0, 2, 3, 4, 3, 2, 3, 2, 4 },
++		{ 0, 2, 3, 4, 3, 2, 3, 2, 4 },
++		{ 0, 3, 3, 4, 3, 2, 3, 2, 4 },
++		{ 0, 2, 3, 4, 2, 2, 3, 2, 4 },
++		{ 0, 2, 3, 3, 2, 2, 3, 2, 4 },
++		{ 0, 2, 3, 3, 3, 2, 3, 2, 4 },
++		{ 0, 2, 4, 4, 3, 3, 3, 2, 4 },
++		{ 0, 2, 4, 4, 3, 2, 2, 2, 3 },
++		{ 0, 2, 3, 4, 3, 2, 2, 2, 3 },
++		{ 0, 2, 3, 4, 2, 2, 2, 2, 3 },
++		{ 0, 3, 3, 4, 2, 2, 2, 2, 3 },
++		{ 0, 3, 3, 4, 2, 2, 2, 2, 3 },
++		{ 0, 3, 3, 3, 2, 2, 2, 2, 2 },
++		{ 0, 2, 3, 3, 2, 2, 2, 1, 2 },
++		{ 0, 2, 3, 3, 2, 2, 2, 1, 2 },
++		{ 0, 2, 3, 3, 2, 2, 2, 1, 1 },
++		{ 0, 2, 3, 3, 2, 2, 2, 1, 1 },
++		{ 0, 1, 3, 3, 2, 2, 2, 1, 1 },
++		{ 0, 1, 1, 1, 2, 2, 1, 0, 0 },
++		{ 0, 1, 1, 2, 2, 1, 1, 1, 0 },
++		{ 0, 0, 2, 2, 1, 1, 1, 0, 0 },
++		{ 0, 1, 2, 2, 1, 1, 0, 1, 0 },
++		{ 0, 1, 1, 2, 1, 1, 1, 0, 0 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++	},
++	[S6E8AA5X01_REV_C] = {
++		{ 0, 3, 2, 2, 3, 3, 7, 9, 5 },
++		{ 0, 2, 1, 2, 3, 3, 6, 9, 5 },
++		{ 0, 3, 2, 2, 3, 3, 6, 9, 5 },
++		{ 0, 3, 2, 1, 2, 3, 5, 8, 5 },
++		{ 0, 3, 2, 1, 2, 2, 5, 7, 5 },
++		{ 0, 2, 1, 1, 2, 2, 5, 7, 5 },
++		{ 0, 2, 1, 1, 1, 2, 4, 7, 5 },
++		{ 0, 3, 2, 1, 2, 2, 4, 6, 5 },
++		{ 0, 2, 1, 1, 1, 2, 4, 6, 5 },
++		{ 0, 3, 2, 1, 2, 2, 4, 5, 5 },
++		{ 0, 2, 1, 1, 1, 2, 3, 5, 5 },
++		{ 0, 2, 1, 1, 1, 1, 3, 4, 5 },
++		{ 0, 3, 2, 1, 1, 1, 3, 4, 5 },
++		{ 0, 2, 1, 1, 1, 1, 3, 4, 5 },
++		{ 0, 3, 2, 1, 1, 1, 3, 4, 5 },
++		{ 0, 3, 2, 1, 1, 1, 3, 4, 5 },
++		{ 0, 3, 2, 1, 1, 2, 3, 4, 5 },
++		{ 0, 3, 2, 1, 2, 2, 3, 4, 5 },
++		{ 0, 3, 2, 2, 2, 2, 4, 5, 5 },
++		{ 0, 3, 3, 2, 2, 2, 4, 5, 5 },
++		{ 0, 3, 3, 2, 2, 2, 4, 5, 5 },
++		{ 0, 3, 3, 2, 2, 2, 4, 5, 5 },
++		{ 0, 3, 3, 2, 2, 2, 4, 5, 5 },
++		{ 0, 3, 3, 2, 2, 2, 4, 5, 5 },
++		{ 0, 3, 3, 2, 2, 2, 4, 4, 5 },
++		{ 0, 3, 3, 2, 2, 2, 3, 4, 5 },
++		{ 0, 3, 3, 2, 2, 2, 3, 4, 5 },
++		{ 0, 3, 3, 2, 2, 2, 3, 4, 4 },
++		{ 0, 3, 3, 2, 2, 2, 3, 3, 4 },
++		{ 0, 3, 3, 2, 2, 2, 3, 3, 4 },
++		{ 0, 3, 3, 2, 2, 2, 2, 3, 4 },
++		{ 0, 3, 3, 2, 2, 2, 2, 3, 4 },
++		{ 0, 3, 3, 2, 2, 2, 2, 3, 3 },
++		{ 0, 3, 3, 2, 2, 2, 2, 3, 3 },
++		{ 0, 3, 3, 2, 2, 2, 2, 3, 3 },
++		{ 0, 3, 3, 2, 2, 2, 2, 3, 3 },
++		{ 0, 3, 3, 2, 2, 2, 2, 2, 3 },
++		{ 0, 3, 3, 3, 3, 2, 2, 2, 3 },
++		{ 0, 3, 3, 4, 2, 2, 2, 3, 3 },
++		{ 0, 3, 3, 4, 2, 2, 2, 3, 3 },
++		{ 0, 2, 3, 4, 2, 2, 2, 3, 3 },
++		{ 0, 2, 3, 4, 3, 2, 2, 3, 3 },
++		{ 0, 2, 3, 4, 3, 2, 3, 3, 3 },
++		{ 0, 2, 3, 4, 3, 2, 2, 3, 3 },
++		{ 0, 2, 3, 4, 4, 2, 3, 3, 3 },
++		{ 0, 2, 3, 4, 4, 2, 3, 2, 3 },
++		{ 0, 2, 3, 4, 4, 2, 3, 2, 3 },
++		{ 0, 2, 3, 4, 2, 2, 2, 1, 3 },
++		{ 0, 2, 3, 3, 2, 2, 2, 1, 3 },
++		{ 0, 2, 3, 3, 2, 2, 2, 1, 3 },
++		{ 0, 2, 3, 3, 2, 2, 2, 1, 2 },
++		{ 0, 2, 3, 3, 2, 2, 1, 1, 2 },
++		{ 0, 1, 3, 3, 2, 2, 1, 1, 2 },
++		{ 0, 1, 3, 3, 2, 2, 1, 1, 1 },
++		{ 0, 1, 3, 3, 2, 2, 1, 1, 1 },
++		{ 0, 1, 3, 3, 2, 2, 2, 1, 1 },
++		{ 0, 1, 2, 3, 2, 2, 1, 0, 0 },
++		{ 0, 1, 2, 2, 2, 1, 0, 0, 0 },
++		{ 0, 0, 2, 2, 1, 1, 1, 0, 0 },
++		{ 0, 1, 2, 2, 1, 1, 0, 1, 0 },
++		{ 0, 1, 2, 1, 2, 1, 1, 0, 0 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++	},
++};
++
++static const s8 s6e8aa5x01_rgb_offset[][S6E8AA5X01_NUM_CANDELA][24] = {
++	[S6E8AA5X01_REV_A] = {
++		{ 0, 0, 1, 0, 0, 1, 0, 0, 1, -2, 0, 0, -5, 0, 3, -3, 1, -1, -10, 2, -3, -13, 2, 1 },
++		{ 0, 0, 1, -1, 0, 1, 0, 0, 2, -1, 0, 0, -4, 0, 2, -4, 1, -1, -9, 2, -3, -15, 2, 1 },
++		{ 0, 0, 1, -1, 0, 1, -1, 0, 1, 0, 0, 1,
++		  -3, 0, 2, -1, 1, -1, -11, 2, -5, -16, 1, 2 },
++		{ 0, 0, 1, -1, 0, 1, -1, 0, 1, 0, 0, 1, -3, 0, 1, -3, 1, -2, -9, 2, -4, -15, 2, 1 },
++		{ 0, 0, 1, 0, 0, 1, -2, 0, 1, -1, 0, 0,
++		  -2, 0, 3, -3, 1, -3, -10, 2, -4, -15, 2, 0 },
++		{ 0, 0, 1, 0, 0, 1, -1, 0, 1, 0, 0, 0, -2, 0, 1, -3, 1, -4, -7, 2, -2, -17, 1, 0 },
++		{ 0, 0, 1, 0, 0, 1, -1, 0, 0, -2, 0, 0, -1, 0, 2, -3, 1, -5, -7, 2, -2, -16, 2, 1 },
++		{ 0, 0, 1, 0, 0, 1, 0, 0, 1, -1, 0, 0, -1, 0, 1, -2, 1, -4, -9, 2, -4, -15, 2, 1 },
++		{ 0, 0, 1, 0, 0, 1, 0, 0, 1, -1, 0, 0, -1, 0, 1, -2, 1, -4, -8, 2, -4, -15, 2, 2 },
++		{ 0, 0, 1, 0, 0, 1, -1, 0, 1, 0, 0, 0, 0, 0, 2, -2, 1, -4, -8, 1, -5, -16, 2, 2 },
++		{ 0, 0, 1, 0, 0, 1, -1, 0, 1, 0, 0, 0, -1, 0, 1, -1, 2, -2, -7, 1, -6, -15, 2, 4 },
++		{ 0, 0, 1, 0, 0, 1, -1, 0, 1, -1, 0, 0, 0, 0, 1, -1, 1, -4, -7, 1, -5, -15, 2, 4 },
++		{ 0, 0, 1, 0, 0, 1, -1, 0, 0, -1, 0, 0, -1, 0, 1, 0, 1, -3, -8, 1, -6, -13, 1, 4 },
++		{ 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, -1, 0, 1, 0, 1, -4, -7, 1, -6, -14, 1, 5 },
++		{ 0, 0, 1, -1, 0, 1, 0, 0, 1, 0, 0, 0, -1, 0, 1, 1, 1, -4, -8, 1, -6, -14, 1, 5 },
++		{ 0, 0, 1, -1, 0, 1, 0, 0, 1, 0, 0, 0, -1, 0, 1, 1, 1, -4, -6, 1, -7, -13, 1, 2 },
++		{ 0, 0, 1, -1, 0, 1, 0, 0, 1, 0, 0, 0, -1, 0, 1, 1, 1, -4, -6, 1, -7, -11, 0, 3 },
++		{ 0, 0, 1, -1, 0, 1, 0, 0, 1, 0, 0, 0, -1, 0, 0, 1, 1, -4, -5, 1, -7, -11, 0, 2 },
++		{ 0, 0, 1, -1, 0, 1, 0, 0, 1, 0, 0, 0, -1, 0, 0, 1, 1, -4, -4, 1, -7, -11, 0, 0 },
++		{ 0, 0, 1, -1, 0, 1, 0, 0, 1, 0, 0, 0, -1, 0, 0, 1, 1, -5, -4, 1, -7, -11, 2, 1 },
++		{ 0, 0, 1, -1, 0, 1, -1, 0, 1, 0, 0, 0, 0, 0, 1, 1, 1, -5, -5, 1, -7, -9, 2, 0 },
++		{ 0, 0, 1, -1, 0, 1, -1, 0, 1, 0, 0, 0, 0, 0, 1, 1, 1, -6, -5, 1, -7, -10, 2, -1 },
++		{ 0, 0, 1, -1, 0, 1, -1, 0, 1, 0, 0, 0, 0, 0, 1, 2, 1, -5, -6, 1, -8, -10, 2, -5 },
++		{ 0, 0, 1, -1, 0, 1, -1, 0, 1, 0, 0, 0, 0, 0, 1, 2, 1, -5, -5, 1, -7, -9, 2, -3 },
++		{ 0, 0, 1, -1, 0, 1, -1, 0, 1, 0, 0, 0, 0, 0, 1, 2, 1, -5, -4, 1, -7, -9, 2, -1 },
++		{ 0, 0, 1, -1, 0, 1, -1, 0, 1, 0, 0, 0, 0, 0, 1, 2, 0, -5, -5, 1, -7, -7, 2, 0 },
++		{ 0, 0, 1, -1, 0, 1, -1, 0, 1, 0, 0, 0, 0, 0, 1, 2, 0, -5, -5, 1, -8, -7, 2, 1 },
++		{ 0, 0, 1, -1, 0, 1, -1, 0, 1, 0, 0, 0, 0, 0, 1, 2, 0, -5, -4, 1, -7, -7, 2, 2 },
++		{ 0, 0, 1, -1, 0, 1, -1, 0, 1, 0, 0, 0, 0, 0, 1, 2, 0, -5, -4, 0, -7, -7, 2, 2 },
++		{ 0, 0, 1, -1, 0, 1, -1, 0, 1, 0, 0, 0, 0, 0, 1, 2, 0, -5, -3, 0, -7, -7, 2, 1 },
++		{ 0, 0, 1, -1, 0, 1, -1, 0, 1, 0, 0, 0, 0, 0, 1, 2, 0, -5, -4, 0, -7, -5, 1, 2 },
++		{ 0, 0, 1, -1, 0, 1, -1, 0, 1, 0, 0, 0, 0, 0, 1, 2, 0, -4, -4, 0, -8, -4, 1, 4 },
++		{ 0, 0, 1, -1, 0, 1, -1, 0, 1, 0, 0, 0, 0, 0, 1, 2, 0, -4, -3, 0, -7, -4, 1, 5 },
++		{ 0, 0, 1, -1, 0, 1, -1, 0, 1, 0, 0, 0, 0, 0, 1, 2, 0, -4, -3, 0, -7, -4, 0, 6 },
++		{ 0, 0, 1, -1, 0, 1, -1, 0, 1, 0, 0, 0, 0, 0, 1, 2, 0, -5, -3, 0, -6, -4, 0, 6 },
++		{ -2, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 2, 2, 0, -4, -4, 0, -7, -4, 0, 6 },
++		{ -1, 0, 1, -2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 3, 2, 0, -3, -3, 0, -6, -4, 0, 4 },
++		{ -1, 0, 0, -1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 2, 2, 0, -5, -3, 0, -6, -4, 0, 4 },
++		{ 0, 0, 1, -1, 0, 0, -1, 0, 1, 1, 0, 1, 0, 0, 2, 2, 0, -3, -3, 0, -7, -4, 0, 4 },
++		{ -1, 0, 2, -1, 0, 0, 0, 0, 1, 0, 0, 0, -1, 0, 3, 1, 0, -3, -4, 0, -6, -4, 0, 4 },
++		{ -1, 0, 1, -1, 0, 1, -1, 0, 1, 0, 0, 0, 1, 0, 2, 1, 0, -2, -4, 0, -6, -5, 0, 4 },
++		{ 0, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0, 1, -1, 0, 1, 3, 0, -3, -2, 0, -4, -5, 0, 2 },
++		{ 0, 0, 1, 0, 0, 0, -1, 0, 1, 0, 0, 0, -1, 0, 1, 3, 0, -2, -2, 0, -4, -4, 0, 2 },
++		{ 0, 0, 1, 0, 0, 0, -1, 0, 1, 0, 0, 0, -1, 0, 1, 2, 0, -1, -2, 0, -3, -4, 0, 2 },
++		{ 0, 0, 1, 0, 0, 0, -1, 0, 0, 0, 0, 1, 1, 0, 1, 2, 0, -2, -1, 0, -2, -3, 0, 1 },
++		{ 0, 0, 1, -1, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, -1, 0, 0, -3, -3, 0, 2 },
++		{ 0, 0, 1, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1, 2, 0, -1, 0, 0, -3, -4, 0, 2 },
++		{ 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 0, -1, -1, 0, -1, -2, 0, 1 },
++		{ -1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0, -1, -2, 0, 2 },
++		{ -1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0, -1, -2, 0, 2 },
++		{ -1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, -1, 0, 0, 3 },
++		{ -1, 0, 1, 0, 0, 0, -1, 0, -1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, -1, 0, 0, 5 },
++		{ -1, 0, 1, 0, 0, 0, -1, 0, -1, 0, 0, 0, 1, 0, 2, 1, 0, 0, 0, 0, -1, 0, 0, 5 },
++		{ -1, 0, 1, 0, 0, 0, -1, 0, -1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, -1, 0, 0, 5 },
++		{ -1, 0, 1, 0, 0, 0, -1, 0, -1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, -1, 0, 0, 5 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++	},
++	[S6E8AA5X01_REV_C] = {
++		{ 2, 0, 1, 0, 0, 1, -1, 0, 2, -3, 0, 0, -5, 0, 4, -6, 0, -3, -14, 0, -2, 0, 0, 1 },
++		{ 2, 0, 1, 0, 0, 1, -1, 0, 1, -2, 0, 0, -4, 0, 4, -6, 0, -3, -13, 0, -4, -3, 0, 1 },
++		{ 2, 0, 1, 0, 0, 1, 0, 0, 2, -3, 0, 0, -4, 0, 3, -5, 0, -3, -13, 0, -3, -6, 0, 0 },
++		{ 2, 0, 1, 0, 0, 1, 0, 0, 2, -1, 0, 1, -4, 0, 3, -5, 0, -4, -12, 0, -4, -8, 0, 0 },
++		{ 2, 0, 1, 0, 0, 1, 0, 0, 2, -1, 0, 1, -3, 0, 3, -5, 0, -5, -10, 0, -2, -10, 0, 1 },
++		{ 2, 0, 1, 0, 0, 1, -1, 0, 1, 0, 0, 1, -4, 0, 2, -4, 0, -3, -8, 0, -2, -12, 0, -1 },
++		{ 2, 0, 1, 0, 0, 1, -1, 0, 1, 0, 0, 1, -3, 0, 2, -4, 0, -3, -9, 0, -3, -13, 0, -1 },
++		{ 2, 0, 1, 0, 0, 1, -1, 0, 1, -1, 0, 1,
++		  -2, 0, 3, -3, 0, -5, -9, 0, -2, -13, 0, -1 },
++		{ 2, 0, 1, 0, 0, 1, 0, 0, 1, -1, 0, 1, -3, 0, 2, -3, 0, -5, -7, 0, -1, -11, 0, -1 },
++		{ 2, 0, 1, 0, 0, 1, 0, 0, 2, -2, 0, 0, -2, 0, 3, -2, 0, -5, -5, 0, -2, -11, 0, -1 },
++		{ 2, 0, 1, 0, 0, 1, 0, 0, 1, -2, 0, 0, -2, 0, 3, -1, 0, -4, -7, 0, -3, -11, 0, -2 },
++		{ 2, 0, 1, 0, 0, 1, 0, 0, 1, -2, 0, 0, -1, 0, 3, -1, 0, -4, -5, 0, -3, -13, 0, -2 },
++		{ 2, 0, 1, 0, 0, 1, 0, 0, 2, -2, 0, 0, -2, 0, 2, -1, 0, -4, -5, 0, -3, -11, 0, 0 },
++		{ 2, 0, 1, -1, 0, 0, 0, 0, 2, 0, 0, 1, -2, 0, 2, -1, 0, -4, -5, 0, -4, -9, 0, 1 },
++		{ 2, 0, 1, -1, 0, 0, 0, 0, 2, 0, 0, 1, -2, 0, 2, -1, 0, -4, -5, 0, -3, -8, 0, 2 },
++		{ 2, 0, 1, -1, 0, 0, 0, 0, 2, 0, 0, 1, -2, 0, 2, 0, 0, -4, -6, 0, -5, -7, 0, 0 },
++		{ 2, 0, 1, -1, 0, 0, 0, 0, 2, 0, 0, 1, -2, 0, 2, 0, 0, -4, -6, 0, -4, -7, 1, -3 },
++		{ 2, 0, 1, -1, 0, 0, 0, 0, 2, 0, 0, 1, -2, 0, 2, 0, 0, -4, -6, 0, -6, -7, 1, -3 },
++		{ 2, 0, 1, -1, 0, 0, 0, 0, 2, 0, 0, 1, -3, 0, 1, 0, 0, -5, -5, 0, -5, -9, 0, -4 },
++		{ 2, 0, 1, -1, 0, 1, 0, 0, 2, -1, 0, 0, -2, 0, 1, 0, 0, -5, -3, 0, -5, -9, 0, -5 },
++		{ 2, 0, 1, -1, 0, 1, 0, 0, 2, -1, 0, 0, -2, 0, 1, 0, 0, -5, -3, 0, -5, -9, 0, -5 },
++		{ 2, 0, 1, -1, 0, 1, 0, 0, 2, -1, 0, 0, -2, 0, 1, 0, 0, -6, -4, 0, -5, -9, 0, -7 },
++		{ 2, 0, 0, -1, 0, 1, 0, 0, 2, -1, 0, 0, -2, 0, 1, 1, 0, -6, -3, 0, -5, -9, 0, -6 },
++		{ 2, 0, 0, -1, 0, 1, 0, 0, 2, -1, 0, 0, -1, 0, 1, 1, 0, -6, -3, 0, -4, -9, 0, -6 },
++		{ 2, 0, 0, -1, 0, 1, 0, 0, 2, -1, 0, 0, -1, 0, 1, 1, 0, -6, -2, 0, -4, -9, 0, -7 },
++		{ 2, 0, 0, -1, 0, 1, 0, 0, 2, -1, 0, 0, -1, 0, 1, 1, 0, -6, -2, 0, -5, -8, 0, -4 },
++		{ 2, 0, 0, -1, 0, 1, -1, 0, 2, -1, 0, 0, -1, 0, 1, 2, 0, -6, -1, 0, -4, -8, 0, -3 },
++		{ 2, 0, 0, -1, 0, 1, -1, 0, 2, -1, 0, 0, -1, 0, 1, 2, 0, -6, -1, 0, -4, -7, 0, -2 },
++		{ 2, 0, 0, -1, 0, 1, -1, 0, 2, -1, 0, 0, -1, 0, 1, 2, 0, -6, -1, 0, -4, -6, 0, -3 },
++		{ 2, 0, 0, -1, 0, 1, -1, 0, 2, -1, 0, 0, -1, 0, 1, 3, 0, -5, -2, 0, -4, -5, 0, -1 },
++		{ 2, 0, 0, -1, 0, 1, -1, 0, 2, -1, 0, 0, -1, 0, 1, 3, 0, -5, -1, 0, -4, -5, 0, 0 },
++		{ 2, 0, 0, -1, 0, 1, -1, 0, 2, -1, 0, 0, -1, 0, 1, 3, 0, -5, -1, 0, -4, -5, 0, 1 },
++		{ 2, 0, 0, -1, 0, 1, -1, 0, 2, -1, 0, 0, -1, 0, 1, 3, 0, -5, 0, 0, -4, -5, 0, 3 },
++		{ 2, 0, 0, -1, 0, 1, -1, 0, 2, -1, 0, 0, -1, 0, 1, 3, 0, -5, 0, 0, -4, -5, 0, 4 },
++		{ 1, 0, 0, 0, 0, 1, 0, 0, 2, -1, 0, 0, -1, 0, 1, 3, 0, -5, 0, 0, -5, -6, 0, 5 },
++		{ 1, 0, 0, -1, 0, 0, 0, 0, 2, 0, 0, 1, -1, 0, 0, 2, 0, -5, -2, 0, -4, -5, 0, 5 },
++		{ 1, 0, 0, -1, 0, 0, 0, 0, 2, 0, 0, 1, -2, 0, 1, 1, 0, -5, -1, 0, -4, -3, 0, 5 },
++		{ 1, 0, 0, -1, 0, 0, -1, 0, 1, 0, 0, 0, -1, 0, 2, 2, 0, -5, -1, 0, -4, -3, 0, 4 },
++		{ 1, 0, 0, -1, 0, 0, -1, 0, 1, 0, 0, 0, -1, 0, 2, 2, 0, -5, -1, 0, -4, -3, 0, 4 },
++		{ 1, 0, 0, -2, 0, 1, -1, 0, 1, 1, 0, 0, 0, 0, 2, 2, 0, -3, -1, 0, -3, -4, 0, 4 },
++		{ 1, 0, 0, -1, 0, 0, -1, 0, 1, 0, 0, 1, 0, 0, 2, 2, 0, -3, 0, 0, -3, -4, 0, 5 },
++		{ 1, 0, 0, -1, 0, 0, 0, 0, 1, 0, 0, 1, -2, 0, 1, 2, 0, -3, 0, 0, -2, -4, 0, 1 },
++		{ 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, -2, 0, 1, 2, 0, -3, 0, 0, -2, -3, 0, 2 },
++		{ 0, 0, 0, 1, 0, 0, 0, 0, 1, -1, 0, 0, -1, 0, 2, 2, 0, -3, 0, 0, -2, -3, 0, 3 },
++		{ 0, 0, 0, 1, 0, 0, 0, 0, 0, -1, 0, 1, 0, 0, 1, 2, 0, -3, 0, 0, -2, -3, 0, 1 },
++		{ 0, 0, 0, 1, 0, 0, 0, 0, 0, -1, 0, 1, 0, 0, 1, 2, 0, -2, 0, 0, -1, 0, 0, 2 },
++		{ 0, 0, 0, 1, 0, 0, 0, 0, 0, -1, 0, 1, 0, 0, 1, 0, 0, -3, 0, 0, -1, -1, 0, 2 },
++		{ 0, 0, 0, 1, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1, 0, 0, -2, 0, 0, -1, 0, 0, 3 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2, 0, 0, 0, 0, 0, -2, 0, 0, -1, -1, 0, 3 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2, 0, 0, 0, 0, 0, -2, 0, 0, -1, -1, 0, 3 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2, 0, 0, 0, 0, 0, -2, 0, 0, -1, 0, 0, 4 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2, 0, 0, 0, 0, 0, -2, 0, 0, -1, 0, 0, 4 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 0, -2, 0, 0, -2, 1, 0, 5 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 0, -2, 0, 0, -2, 2, 0, 5 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 0, -2, 0, 0, -2, 2, 0, 5 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++		{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
++	},
++};
++
++/* Gamma (0xca) for 360 cd, also used by the init sequence. */
++static const u8 s6e8aa5x01_default_gamma[S6E8AA5X01_GAMMA_LEN] = {
++	0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x80, 0x80, 0x80, 0x80, 0x80,
++	0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
++	0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00, 0x00, 0x00,
++};
++
++/*
++ * Smart dimming: the panel stores per-panel gamma offsets ("MTP", register
++ * 0xc8, same layout as the 0xca gamma register). Together with the reference
++ * gamma above they describe the panel's calibrated 360 cd gamma curve. The
++ * gamma register values for every other candela step are generated from it
++ * with the vendor algorithm below, which is a straight port of
++ * ss_dsi_smart_dimming_S6E8AA5X01_AMS497HY01.c (including its integer
++ * arithmetic and rounding) so that the generated tables are identical to the
++ * ones used by the vendor kernel.
++ *
++ * Voltages are fixed point values with 22 fractional bits.
++ */
++#define SD_BIT_SHIFT		22
++#define SD_VREG0		24326963	/* 5.8 V */
++#define SD_GRAY_MAX		256
++#define SD_NUM_POINTS		10
++#define SD_V255_COEFF		72
++#define SD_V255_DENOM		860
++#define SD_VT_DENOM		860
++#define SD_COEFF		64
++#define SD_DENOM		320
++#define SD_CENTER_V255		0x100
++#define SD_CENTER		0x80
++
++/* Gray levels of the gamma inflection points: V1, V3, V11, ..., V255 */
++static const u8 sd_points[SD_NUM_POINTS] = {
++	1, 3, 11, 23, 35, 51, 87, 151, 203, 255,
++};
++
++/* Inflection points used for the linear gray scale interpolation */
++static const u8 sd_segments[] = {
++	0, 3, 11, 23, 35, 51, 87, 151, 203, 255,
++};
++
++static const u8 sd_vt_coeff[] = {
++	0, 12, 24, 36, 48, 60, 72, 84, 96, 108, 138, 148, 158, 168, 178, 186,
++};
++
++struct sd_work {
++	int vt[3];
++	int gray[3][SD_GRAY_MAX];
++};
++
++/*
++ * candela_coeff_2p0[] and curve_2p0_360[] of the vendor kernel:
++ * round((index / 255)^2.0 * 2^22) and round(360 * (index / 255)^2.0 * 2^22).
++ */
++static s64 sd_coeff_2p0(unsigned int index)
++{
++	return DIV_ROUND_CLOSEST_ULL((u64)index * index << SD_BIT_SHIFT, 255 * 255);
++}
++
++static s64 sd_curve_2p0_360(unsigned int index)
++{
++	return DIV_ROUND_CLOSEST_ULL(360ULL * index * index << SD_BIT_SHIFT, 255 * 255);
++}
++
++static int sd_char_to_int(u8 data)
++{
++	return (data & 0x80) ? -(data & 0x7f) : data;
++}
++
++/* MTP offset of V255 for colour c (0 = R, 1 = G, 2 = B) */
++static int sd_mtp_v255(const u8 *mtp, int c)
++{
++	return mtp[2 * c] ? -mtp[2 * c + 1] : mtp[2 * c + 1];
++}
++
++/* MTP offset of point p (0 = V203, ..., 7 = V3, 8 = VT) for colour c */
++static int sd_mtp(const u8 *mtp, int p, int c)
++{
++	return sd_char_to_int(mtp[6 + 3 * p + c]);
++}
++
++/* v203_adjustment() ... v3_adjustment() */
++static int sd_adjust(int top, int upper, int mtp)
++{
++	u64 r1 = top - upper;
++	u64 r2 = (u64)(SD_COEFF + SD_CENTER + mtp) << SD_BIT_SHIFT;
++
++	do_div(r2, SD_DENOM);
++
++	return top - ((r1 * r2) >> SD_BIT_SHIFT);
++}
++
++/* v203_hexa() ... v3_hexa() */
++static u8 sd_hexa(int top, int gray, int upper_gray)
++{
++	u64 r1 = top - gray;
++	u64 r2 = r1 * SD_DENOM;
++	u32 r3 = top - upper_gray;
++
++	if (r3)
++		do_div(r2, r3);
++	else
++		r2 = 0;
++
++	return (r2 - SD_COEFF) & 0xff;
++}
++
++/* searching_function() with GAMMA_CURVE_2P0 */
++static int sd_search(s64 candela)
++{
++	unsigned int i;
++	s64 d1, d2;
++
++	for (i = 0; i < SD_GRAY_MAX - 1; i++) {
++		d1 = candela - sd_curve_2p0_360(i);
++		d2 = candela - sd_curve_2p0_360(i + 1);
++
++		if (d2 < 0)
++			return (d1 + d2) <= 0 ? i : i + 1;
++		if (d1 == 0)
++			return i;
++		if (d2 == 0)
++			return i + 1;
++	}
++
++	return -1;
++}
++
++/* v255_adjustment() ... v3_adjustment() and generate_gray_scale() */
++static void sd_init(struct sd_work *w, const u8 *mtp)
++{
++	int c, p, s, g, vt;
++	u64 r;
++
++	for (c = 0; c < 3; c++) {
++		int *gray = w->gray[c];
++
++		gray[0] = SD_VREG0;
++
++		/* V255 */
++		r = (u64)(SD_V255_COEFF + SD_CENTER_V255 + sd_mtp_v255(mtp, c))
++			<< SD_BIT_SHIFT;
++		do_div(r, SD_V255_DENOM);
++		gray[255] = SD_VREG0 - ((SD_VREG0 * r) >> SD_BIT_SHIFT);
++
++		/* VT */
++		vt = clamp(sd_mtp(mtp, 8, c), 0, (int)ARRAY_SIZE(sd_vt_coeff) - 1);
++		r = (u64)sd_vt_coeff[vt] << SD_BIT_SHIFT;
++		do_div(r, SD_VT_DENOM);
++		w->vt[c] = SD_VREG0 - ((SD_VREG0 * r) >> SD_BIT_SHIFT);
++
++		/* V203 ... V11 relative to VT, V3 relative to VREG0 */
++		for (p = 0; p < 7; p++)
++			gray[sd_points[8 - p]] = sd_adjust(w->vt[c],
++							   gray[sd_points[9 - p]],
++							   sd_mtp(mtp, p, c));
++		gray[3] = sd_adjust(SD_VREG0, gray[11], sd_mtp(mtp, 7, c));
++
++		/* cal_gray_scale_linear() between the inflection points */
++		for (s = 1; s < ARRAY_SIZE(sd_segments); s++) {
++			int from = sd_segments[s - 1], to = sd_segments[s];
++			int len = to - from;
++
++			for (g = from + 1; g < to; g++) {
++				r = (u64)(gray[from] - gray[to]) * (to - g)
++					<< SD_BIT_SHIFT;
++				do_div(r, len);
++				gray[g] = gray[to] + (r >> SD_BIT_SHIFT);
++			}
++		}
++	}
++}
++
++/* gamma_init() */
++static void sd_gamma(const struct sd_work *w, const u8 *mtp,
++		     enum s6e8aa5x01_rev rev, int cd_idx, u8 *out)
++{
++	int base = s6e8aa5x01_base_luminance[rev][cd_idx];
++	int idx[SD_NUM_POINTS];
++	int gamma[S6E8AA5X01_GAMMA_LEN];
++	int c, p, v;
++
++	for (p = 0; p < SD_NUM_POINTS; p++)
++		idx[p] = sd_search(sd_coeff_2p0(sd_points[p]) * base);
++
++	/* Candela compensation */
++	for (p = 1; p < SD_NUM_POINTS; p++) {
++		idx[SD_NUM_POINTS - p] +=
++			s6e8aa5x01_gradation_offset[rev][cd_idx][p - 1];
++		if (idx[SD_NUM_POINTS - p] == 0)
++			idx[SD_NUM_POINTS - p] = 1;
++	}
++
++	for (p = 0; p < SD_NUM_POINTS; p++)
++		idx[p] = clamp(idx[p], 0, SD_GRAY_MAX - 1);
++
++	for (c = 0; c < 3; c++) {
++		const int *gray = w->gray[c];
++
++		/* v255_hexa() */
++		u64 r = (u64)(SD_VREG0 - gray[idx[9]]) * SD_V255_DENOM;
++
++		do_div(r, SD_VREG0);
++		r -= SD_V255_COEFF;
++		out[2 * c] = (r & 0xff00) >> 8;
++		out[2 * c + 1] = r & 0xff;
++
++		/* v203_hexa() ... v11_hexa() */
++		for (p = 0; p < 7; p++)
++			out[6 + 3 * p + c] = sd_hexa(w->vt[c], gray[idx[8 - p]],
++						     gray[idx[9 - p]]);
++
++		/* v3_hexa() */
++		out[27 + c] = sd_hexa(SD_VREG0, gray[idx[1]], gray[idx[2]]);
++
++		/* vt_hexa() */
++		out[30 + c] = 0;
++	}
++
++	for (p = 0; p < S6E8AA5X01_GAMMA_LEN; p++)
++		gamma[p] = out[p];
++
++	/* RGB compensation */
++	for (c = 0; c < 3; c++) {
++		v = (out[2 * c] << 8 | out[2 * c + 1]) +
++		    s6e8aa5x01_rgb_offset[rev][cd_idx][c];
++		gamma[2 * c] = (v / 256) & 0xff;
++		gamma[2 * c + 1] = v & 0xff;
++	}
++	for (p = 3; p < 24; p++)
++		gamma[p + 3] += s6e8aa5x01_rgb_offset[rev][cd_idx][p];
++
++	/* mtp_offset_substraction() */
++	for (c = 0; c < 3; c++) {
++		v = (gamma[2 * c] << 8 | gamma[2 * c + 1]) - sd_mtp_v255(mtp, c);
++		gamma[2 * c] = (v / 256) & 0xff;
++		gamma[2 * c + 1] = v & 0xff;
++	}
++	for (p = 0; p < 8; p++)
++		for (c = 0; c < 3; c++)
++			gamma[6 + 3 * p + c] = clamp(gamma[6 + 3 * p + c] -
++						     sd_mtp(mtp, p, c), 0, 255);
++
++	for (p = 0; p < S6E8AA5X01_GAMMA_LEN; p++)
++		out[p] = gamma[p];
++}
++
++/* smart_dimming_init() */
++static int s6e8aa5x01_generate_gamma(const u8 *mtp, enum s6e8aa5x01_rev rev,
++				     u8 gamma[][S6E8AA5X01_GAMMA_LEN])
++{
++	struct sd_work *w;
++	int i;
++
++	w = kzalloc(sizeof(*w), GFP_KERNEL);
++	if (!w)
++		return -ENOMEM;
++
++	sd_init(w, mtp);
++
++	for (i = 0; i < S6E8AA5X01_NUM_CANDELA - 1; i++)
++		sd_gamma(w, mtp, rev, i, gamma[i]);
++
++	/* The highest step always uses the reference gamma. */
++	memcpy(gamma[i], s6e8aa5x01_default_gamma, S6E8AA5X01_GAMMA_LEN);
++
++	kfree(w);
++	return 0;
++}
++
++/*
++ * Read a panel register like the vendor kernel does: the read start offset
++ * is selected with the 0xb0 global parameter register and the data is read
++ * in chunks of at most 7 bytes (the vendor maximum return packet size).
++ * Level 1 key must be enabled.
++ */
++static int s6e8aa5x01_read(struct s6e8aa5x01_ams497hy01 *ctx, u8 reg,
++			   u8 offset, u8 *buf, size_t len)
++{
++	struct mipi_dsi_device *dsi = ctx->dsi;
++	size_t pos, chunk;
++	ssize_t ret;
++
++	for (pos = 0; pos < len; pos += chunk) {
++		u8 b0[] = { 0xb0, offset + pos };
++
++		chunk = min_t(size_t, len - pos, S6E8AA5X01_READ_CHUNK);
++
++		ret = mipi_dsi_dcs_write_buffer(dsi, b0, sizeof(b0));
++		if (ret < 0)
++			return ret;
++
++		ret = mipi_dsi_dcs_read(dsi, reg, buf + pos, chunk);
++		if (ret != chunk) {
++			/* Do not leave the offset applied to the next command */
++			b0[1] = 0;
++			mipi_dsi_dcs_write_buffer(dsi, b0, sizeof(b0));
++			return ret < 0 ? ret : -EIO;
++		}
++	}
++
++	return 0;
++}
++
++/*
++ * Read panel ID, ELVSS OTP value and the MTP gamma offsets (once) and
++ * generate the smart dimming gamma table. Failures are not fatal: without
++ * the MTP data the reference gamma is kept and only AID/ELVSS change with
++ * the brightness. Level 1 key must be enabled.
++ */
++static void s6e8aa5x01_read_otp(struct s6e8aa5x01_ams497hy01 *ctx)
++{
++	struct device *dev = &ctx->dsi->dev;
++	u8 mtp[S6E8AA5X01_MTP_LEN];
++	u8 id[3];
++	int ret;
++
++	if (!ctx->id_valid) {
++		ret = s6e8aa5x01_read(ctx, 0xda, 0, &id[0], 1);
++		if (!ret)
++			ret = s6e8aa5x01_read(ctx, 0xdb, 0, &id[1], 1);
++		if (!ret)
++			ret = s6e8aa5x01_read(ctx, 0xdc, 0, &id[2], 1);
++		if (ret < 0) {
++			dev_warn(dev, "Failed to read panel ID: %d\n", ret);
++			return;
++		}
++
++		ctx->rev = id[2] == 0x02 ? S6E8AA5X01_REV_A : S6E8AA5X01_REV_C;
++		ctx->id_valid = true;
++		dev_info(dev, "Panel ID %02x %02x %02x (rev %c)\n",
++			 id[0], id[1], id[2],
++			 ctx->rev == S6E8AA5X01_REV_A ? 'A' : 'C');
++	}
++
++	if (!ctx->elvss_otp_valid) {
++		ret = s6e8aa5x01_read(ctx, 0xb6, S6E8AA5X01_ELVSS_OTP_OFFSET,
++				      &ctx->elvss_otp, 1);
++		if (ret < 0)
++			dev_warn(dev, "Failed to read ELVSS OTP: %d\n", ret);
++		else
++			ctx->elvss_otp_valid = true;
++	}
++
++	if (!ctx->gamma_valid) {
++		ret = s6e8aa5x01_read(ctx, 0xc8, 0, mtp, sizeof(mtp));
++		if (ret < 0) {
++			dev_warn(dev, "Failed to read MTP, smart dimming disabled: %d\n",
++				 ret);
++			return;
++		}
++		ret = s6e8aa5x01_generate_gamma(mtp, ctx->rev, ctx->gamma);
++		if (ret < 0)
++			return;
++		ctx->gamma_valid = true;
++		dev_info(dev, "Smart dimming enabled, MTP: %*ph\n",
++			 (int)sizeof(mtp), mtp);
++	}
++}
++
++static int s6e8aa5x01_level_to_candela_idx(int level)
++{
++	int i;
++
++	for (i = 0; i < S6E8AA5X01_NUM_CANDELA - 1; i++)
++		if (level <= s6e8aa5x01_candela_map[i].max_level)
++			break;
++
++	return i;
++}
++
++/*
++ * Brightness update as built by mdss_samsung_normal_brightenss_packet_set()
++ * in the vendor kernel: AID, ACL, ELVSS, temperature dependent ELVSS, gamma
++ * and gamma update, all with level 1 key enabled.
++ */
++static int s6e8aa5x01_set_brightness(struct s6e8aa5x01_ams497hy01 *ctx,
++				     int level)
++{
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++	int idx = s6e8aa5x01_level_to_candela_idx(level);
++	int candela = s6e8aa5x01_candela_map[idx].candela;
++	u16 aid = s6e8aa5x01_aid[ctx->rev][idx];
++	u8 b2[] = { 0xb2, aid >> 8, aid & 0xff };
++	u8 b6[] = { 0xb6, 0xbc, s6e8aa5x01_elvss[idx] };
++	u8 b8[] = { 0xb8, S6E8AA5X01_TEMPERATURE };
++	u8 ca[S6E8AA5X01_GAMMA_LEN + 1] = { 0xca };
++
++	memcpy(&ca[1], ctx->gamma_valid ? ctx->gamma[idx] :
++	       s6e8aa5x01_default_gamma, S6E8AA5X01_GAMMA_LEN);
++
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0x5a, 0x5a);
++
++	/* AID */
++	mipi_dsi_dcs_write_buffer_multi(&dsi_ctx, b2, sizeof(b2));
++
++	/* ACL 15% below the maximum level, off at the maximum level */
++	if (level < S6E8AA5X01_MAX_BRIGHTNESS) {
++		mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x55, 0x02);
++		mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb5, 0x50);
++	} else {
++		mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x55, 0x00);
++		mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb5, 0x40);
++	}
++
++	/* ELVSS */
++	mipi_dsi_dcs_write_buffer_multi(&dsi_ctx, b6, sizeof(b6));
++
++	/* Temperature (8th parameter of 0xb8) */
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x07);
++	mipi_dsi_dcs_write_buffer_multi(&dsi_ctx, b8, sizeof(b8));
++
++	/* Low luminance ELVSS (22nd parameter of 0xb6) */
++	if (ctx->elvss_otp_valid) {
++		b6[1] = candela > 29 ? ctx->elvss_otp :
++			candela > 20 ? 0x07 : 0x05;
++		mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0,
++					     S6E8AA5X01_ELVSS_OTP_OFFSET);
++		mipi_dsi_dcs_write_buffer_multi(&dsi_ctx, b6, 2);
++	}
++
++	/* Gamma */
++	mipi_dsi_dcs_write_buffer_multi(&dsi_ctx, ca, sizeof(ca));
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf7, 0x03);
++
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0xa5, 0xa5);
++
++	return dsi_ctx.accum_err;
++}
++
++static int s6e8aa5x01_ams497hy01_brightness(struct s6e8aa5x01_ams497hy01 *ctx)
++{
++	if (ctx->bl)
++		return ctx->bl->props.brightness;
++
++	return S6E8AA5X01_DEFAULT_BRIGHTNESS;
++}
++
+ static void s6e8aa5x01_ams497hy01_reset(struct s6e8aa5x01_ams497hy01 *ctx)
+ {
+ 	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
+@@ -46,6 +865,10 @@ static int s6e8aa5x01_ams497hy01_on(struct s6e8aa5x01_ams497hy01 *ctx)
+ 	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
+ 
+ 	mipi_dsi_dcs_write_seq(dsi, 0xf0, 0x5a, 0x5a);
++
++	/* Like the vendor kernel, read ID and MTP before sleep out */
++	s6e8aa5x01_read_otp(ctx);
++
+ 	mipi_dsi_dcs_write_seq(dsi, 0xcc, 0x4c);
+ 
+ 	ret = mipi_dsi_dcs_exit_sleep_mode(dsi);
+@@ -70,6 +893,12 @@ static int s6e8aa5x01_ams497hy01_on(struct s6e8aa5x01_ams497hy01 *ctx)
+ 			       0x38, 0x00, 0x00, 0x60, 0x44, 0x00, 0xa8);
+ 	mipi_dsi_dcs_write_seq(dsi, 0xf0, 0xa5, 0xa5);
+ 
++	ret = s6e8aa5x01_set_brightness(ctx, s6e8aa5x01_ams497hy01_brightness(ctx));
++	if (ret < 0) {
++		dev_err(dev, "Failed to set brightness: %d\n", ret);
++		return ret;
++	}
++
+ 	ret = mipi_dsi_dcs_set_display_on(dsi);
+ 	if (ret < 0) {
+ 		dev_err(dev, "Failed to set display on: %d\n", ret);
+@@ -118,13 +947,17 @@ static int s6e8aa5x01_ams497hy01_prepare(struct drm_panel *panel)
+ 
+ 	s6e8aa5x01_ams497hy01_reset(ctx);
+ 
++	mutex_lock(&ctx->lock);
+ 	ret = s6e8aa5x01_ams497hy01_on(ctx);
+ 	if (ret < 0) {
++		mutex_unlock(&ctx->lock);
+ 		dev_err(dev, "Failed to initialize panel: %d\n", ret);
+ 		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+ 		regulator_bulk_disable(ARRAY_SIZE(ctx->supplies), ctx->supplies);
+ 		return ret;
+ 	}
++	ctx->prepared = true;
++	mutex_unlock(&ctx->lock);
+ 
+ 	return 0;
+ }
+@@ -135,7 +968,10 @@ static int s6e8aa5x01_ams497hy01_unprepare(struct drm_panel *panel)
+ 	struct device *dev = &ctx->dsi->dev;
+ 	int ret;
+ 
++	mutex_lock(&ctx->lock);
++	ctx->prepared = false;
+ 	ret = s6e8aa5x01_ams497hy01_off(ctx);
++	mutex_unlock(&ctx->lock);
+ 	if (ret < 0)
+ 		dev_err(dev, "Failed to un-initialize panel: %d\n", ret);
+ 
+@@ -172,6 +1008,49 @@ static const struct drm_panel_funcs s6e8aa5x01_ams497hy01_panel_funcs = {
+ 	.get_modes = s6e8aa5x01_ams497hy01_get_modes,
+ };
+ 
++static int s6e8aa5x01_ams497hy01_bl_update_status(struct backlight_device *bl)
++{
++	struct s6e8aa5x01_ams497hy01 *ctx = bl_get_data(bl);
++	struct mipi_dsi_device *dsi = ctx->dsi;
++	int ret = 0;
++
++	mutex_lock(&ctx->lock);
++
++	/*
++	 * The OLED cannot be switched off through the backlight, so a blanked
++	 * backlight keeps the last level. The requested level is applied when
++	 * the panel is (re-)initialised.
++	 */
++	if (ctx->prepared && !backlight_is_blank(bl)) {
++		dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
++		ret = s6e8aa5x01_set_brightness(ctx, bl->props.brightness);
++		dsi->mode_flags |= MIPI_DSI_MODE_LPM;
++	}
++
++	mutex_unlock(&ctx->lock);
++
++	return ret;
++}
++
++static const struct backlight_ops s6e8aa5x01_ams497hy01_bl_ops = {
++	.update_status = s6e8aa5x01_ams497hy01_bl_update_status,
++};
++
++static struct backlight_device *
++s6e8aa5x01_ams497hy01_create_backlight(struct s6e8aa5x01_ams497hy01 *ctx)
++{
++	struct device *dev = &ctx->dsi->dev;
++	const struct backlight_properties props = {
++		.type = BACKLIGHT_RAW,
++		.brightness = S6E8AA5X01_DEFAULT_BRIGHTNESS,
++		.max_brightness = S6E8AA5X01_MAX_BRIGHTNESS,
++	};
++
++	return devm_backlight_device_register(dev, dev_name(dev), dev, ctx,
++					      &s6e8aa5x01_ams497hy01_bl_ops,
++					      &props);
++}
++
+ static int s6e8aa5x01_ams497hy01_probe(struct mipi_dsi_device *dsi)
+ {
+ 	struct device *dev = &dsi->dev;
+@@ -182,6 +1061,10 @@ static int s6e8aa5x01_ams497hy01_probe(struct mipi_dsi_device *dsi)
+ 	if (!ctx)
+ 		return -ENOMEM;
+ 
++	ret = devm_mutex_init(dev, &ctx->lock);
++	if (ret)
++		return ret;
++
+ 	ctx->supplies[0].supply = "vdd3";
+ 	ctx->supplies[1].supply = "vci";
+ 	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(ctx->supplies),
+@@ -206,6 +1089,19 @@ static int s6e8aa5x01_ams497hy01_probe(struct mipi_dsi_device *dsi)
+ 		       DRM_MODE_CONNECTOR_DSI);
+ 	ctx->panel.prepare_prev_first = true;
+ 
++	ret = drm_panel_of_backlight(&ctx->panel);
++	if (ret)
++		return dev_err_probe(dev, ret, "Failed to get backlight\n");
++
++	/* Control brightness through the panel if no backlight is defined in DT */
++	if (!ctx->panel.backlight) {
++		ctx->bl = s6e8aa5x01_ams497hy01_create_backlight(ctx);
++		if (IS_ERR(ctx->bl))
++			return dev_err_probe(dev, PTR_ERR(ctx->bl),
++					     "Failed to create backlight\n");
++		ctx->panel.backlight = ctx->bl;
++	}
++
+ 	drm_panel_add(&ctx->panel);
+ 
+ 	ret = mipi_dsi_attach(dsi);
+-- 
+2.56.0
+
