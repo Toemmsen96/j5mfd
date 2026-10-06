@@ -33,6 +33,10 @@ What the series adds, in order:
 6. **Screen brightness** (patch 13). A backlight device for the AMOLED
    panel with a port of Samsung's smart-dimming gamma generation, so the
    brightness slider works across 62 levels from 5 to 360 cd.
+7. **CPU frequencies up to 1.2 GHz** (patch 21, experimental). Mainline
+   stops at 998.4 MHz because the higher rates need more voltage on the CPU
+   rail. The patch describes that rail and adds the three missing rates as
+   opt-in boost frequencies, see "CPU boost" below.
 
 Hardware facts come from the downstream Samsung kernel for j5lte
 (`msm8916-sec-j5lte-eur-r05.dtsi` and the related driver sources).
@@ -61,9 +65,11 @@ Hardware facts come from the downstream Samsung kernel for j5lte
 | `patches/0018-drm-panel-samsung-s6e8aa5x01-ams497hy01-Use-an-integ*.patch` | Pixel clock 83.2 MHz so the DSI PLL runs in integer mode (26 x 19.2 MHz), 59.85 Hz (display noise experiment) |
 | `patches/0019-drm-msm-dsi-28nm-lp-PHY-Program-MSM8916-lane-deskew-*.patch` | msm8916 DSI PHY: vendor per-lane deskew values (LN_CFG_4) and BIST control block (display noise fix candidate) |
 | `patches/0020-drm-panel-samsung-s6e8aa5x01-ams497hy01-Put-mDNIe-in*.patch` | Panel init puts the DDIC's mDNIe image enhancer into bypass mode (vendor tables), candidate fix for the right-side grey noise |
+| `patches/0021-arm64-dts-qcom-msm8916-samsung-j5-Add-CPU-supply-and*.patch` | J5 device tree: PM8916 S2 as CPU supply, 1094.4 / 1152 / 1209.6 MHz at 1.30 V as turbo-mode OPPs (off until boost is enabled), OPP table for the A53 PLL |
 | `kernel/` | The new source files as plain files, for reading or reuse |
+| `tuning/` | `tuned` profiles, sysctl file, GNOME Software override and `install.sh` for the phone, see "Responsiveness tuning" |
 | `pmaports/apply.sh` | Installs the patches and kernel config options into pmaports |
-| `pmaports/kconfig.fragment` | `CONFIG_MFD_SM5703=m`, `CONFIG_REGULATOR_SM5703=m`, `CONFIG_GP2AP002=m`, `CONFIG_BATTERY_SM5703=m`, `CONFIG_VIDEO_S5K5E3=m`, `CONFIG_CHARGER_SM5703=m`, `CONFIG_INTERCONNECT_QCOM=y`, `CONFIG_INTERCONNECT_QCOM_MSM8916=y` |
+| `pmaports/kconfig.fragment` | `CONFIG_MFD_SM5703=m`, `CONFIG_REGULATOR_SM5703=m`, `CONFIG_GP2AP002=m`, `CONFIG_BATTERY_SM5703=m`, `CONFIG_VIDEO_S5K5E3=m`, `CONFIG_CHARGER_SM5703=m`, `CONFIG_INTERCONNECT_QCOM=y`, `CONFIG_INTERCONNECT_QCOM_MSM8916=y`, `CONFIG_REGULATOR_QCOM_SPMI=y` |
 
 Patch provenance: the SM5703 PMIC and regulator drivers are the v5
 submission by Markuss Broks from April 2022 ("Add support for Silicon
@@ -128,6 +134,79 @@ ignores by default. On the phone, as your user:
 gsettings set org.gnome.shell.keybindings toggle-application-view "['<Super>a', 'Menu']"
 ```
 
+## Responsiveness tuning
+
+With the power mode set to Performance, `tuned` applies its
+`throughput-performance` profile, which is meant for servers: besides the
+performance CPU governor it sets `vm.swappiness=10` and a 4 MB disk
+read-ahead. On a phone with 1.4 GB RAM and zram swap both hurt. Measured on
+the J5, a cold GTK/libadwaita load took 2.82 s and pulled 132 MB into the
+page cache with the 4 MB read-ahead, against 2.12 s and 33 MB with the
+kernel default of 128 kB.
+
+GNOME Software is the other large cost. It starts with every session,
+used 202 s of CPU time in the first 3.5 minutes after login (plus 59 s in
+its apk backend) and then keeps 157 MB of RAM.
+
+`tuning/` holds the fixes, and `install.sh` applies them on the phone:
+
+- `j5-interactive` replaces `throughput-performance` for the Performance
+  power mode and only keeps the CPU governor.
+- `90-j5-zram.conf` raises swappiness to 150, because swapping to zram is
+  much cheaper than re-reading file pages from flash.
+- GNOME Software no longer starts at login and its search provider is
+  switched off. It still opens from the app grid, but there are no
+  background update notifications.
+- `j5-balanced` and `j5-balanced-battery` wrap the stock balanced profiles
+  with `boost=0`. The stock ones set `boost=1`, which would switch on the
+  CPU frequencies of patch 21 by themselves.
+
+```sh
+scp -r tuning 172.16.42.1:/tmp/j5-tuning
+ssh 172.16.42.1 /tmp/j5-tuning/install.sh
+```
+
+`tuned-adm active` should then report `j5-interactive`. To undo, copy
+`/etc/tuned/ppd.conf.orig` back, delete the installed files, restart
+`tuned-ppd`, run `systemctl --user unmask gnome-software.service` and
+remove `~/.local/share/dbus-1/services/org.gnome.Software.service`.
+
+### CPU boost (patch 21)
+
+The J5's SoC is rated for 1209.6 MHz. The rates above 998.4 MHz need the
+turbo voltage on the CPU rail (PM8916 S2), which nothing in mainline sets:
+the rail stays at the bootloader's 1.15 V. Patch 21 makes S2 the CPU supply
+and adds 1094.4, 1152 and 1209.6 MHz at 1.30 V. That value is the open-loop
+turbo voltage fused into the tested phone (1.25 V, speed bin 0) plus the
+50 mV Samsung's kernel adds; for another unit use the vendor ceiling of
+1.35 V or decode its own fuses. The vendor kernel additionally changes the
+memory accelerator setting and raises VDD_MX for these rates, which this
+patch does not do, so treat it as an experiment.
+
+The new rates are boost frequencies and off after every boot, so a phone
+that is not stable at them still starts at 998.4 MHz. To try them:
+
+```sh
+cat /sys/devices/system/cpu/cpufreq/policy0/scaling_boost_frequencies   # 1094400 1152000 1209600
+echo 1 | sudo tee /sys/devices/system/cpu/cpufreq/boost
+echo 998400 | sudo tee /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq
+echo 1209600 | sudo tee /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq
+cat /sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq            # 1209600 in Performance mode
+sudo grep a53pll /sys/kernel/debug/clk/clk_summary                      # 1209600000
+cat "$(dirname "$(grep -lx s2 /sys/class/regulator/*/name)")/microvolts" # 1300000
+```
+
+The two `scaling_max_freq` writes are needed on 6.12: the thermal cooling
+device already holds a limit of 1209.6 MHz, so switching boost on does not
+change the combined limit and the governor is never asked to re-target.
+
+Then load all four cores for a while (`sudo apk add stress-ng`, `stress-ng
+--cpu 4 --verify -t 10m`) and watch `/sys/class/thermal/thermal_zone*/temp`;
+the kernel starts throttling at 75 degrees. A crash or hang just needs a
+reboot, which turns boost off again. Once it has proven stable, set
+`boost=1` in `/etc/tuned/profiles/j5-interactive/tuned.conf` and restart
+`tuned` to have it on in Performance mode.
+
 ## Status
 
 - Drivers compile with clang for arm64 against the postmarketOS msm8916
@@ -172,6 +251,13 @@ gsettings set org.gnome.shell.keybindings toggle-application-view "['<Super>a', 
   motion, around UI edges, clean screenshots) match the panel's own mDNIe
   image enhancer running in its reset state; patch 20 programs the vendor
   bypass tables at init (being tested).
+- Patch 21 (CPU boost) on hardware: the regulator probes, the three boost
+  frequencies appear, and with boost on the CPU runs at 1209.6 MHz with S2
+  at 1.30 V. An 8 minute `stress-ng --cpu 4 --verify` run passed without
+  errors. It is thermally limited, though: the CPU reaches 75 to 79
+  degrees within two minutes and the kernel throttles, so under sustained
+  four-core load it averaged about 1.04 GHz and spent a fifth of the time
+  below 998.4 MHz. The gain is for short bursts. Memory stress is untested.
 - Patches 11 and 12 (charger status): compile-tested, not yet run on
   hardware. On a PC USB port the battery current hovers around zero, so
   without them the status flips between Charging and Discharging every few

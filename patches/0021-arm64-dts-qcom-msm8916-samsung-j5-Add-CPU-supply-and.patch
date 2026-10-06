@@ -1,0 +1,160 @@
+From 9749b088949ac8b650eff1738ede758adbcf3e36 Mon Sep 17 00:00:00 2001
+From: Toemmsen96 <147745097+Toemmsen96@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 16:28:19 +0200
+Subject: [PATCH] arm64: dts: qcom: msm8916-samsung-j5: Add CPU supply and
+ turbo OPPs up to 1.2 GHz
+
+MSM8916 is rated for 1209.6 MHz, but the SoC dtsi stops at 998.4 MHz
+because the rates above it need the turbo voltage on the CPU rail
+(PM8916 S2, VDD_APC) and there is no CPR support. Nothing describes S2,
+so it stays at the 1.15 V the bootloader programs.
+
+Describe S2 through the SPMI regulator driver, make it the CPU supply
+and add 1094.4, 1152 and 1209.6 MHz at 1.30 V. That is the open-loop
+turbo voltage fused into the tested SM-J500F (1.25 V, speed bin 0) plus
+the 50 mV Samsung's kernel adds to it; the vendor ceiling is 1.35 V.
+The existing rates keep 1.15 V, so nothing changes for them.
+
+The vendor kernel also switches the memory accelerator to its turbo
+setting and votes VDD_MX up for these rates, neither of which happens
+here. Mark the new OPPs turbo-mode so they stay off until enabled with
+/sys/devices/system/cpu/cpufreq/boost: a unit that is not stable at
+them still boots at 998.4 MHz.
+
+Give the A53 PLL an OPP table as well. The driver's built-in table has
+L = 62 for its 1152 MHz entry, which is 1190.4 MHz; with an OPP table
+the multiplier is computed from the rate.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ .../boot/dts/qcom/msm8916-samsung-j5.dts      | 93 +++++++++++++++++++
+ 1 file changed, 93 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts b/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts
+index 638d27e7a..4cc305449 100644
+--- a/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts
++++ b/arch/arm64/boot/dts/qcom/msm8916-samsung-j5.dts
+@@ -10,6 +10,23 @@ / {
+ 	compatible = "samsung,j5", "qcom,msm8916";
+ 	chassis-type = "handset";
+ 
++	a53pll_opp_table: opp-table-a53pll {
++		compatible = "operating-points-v2";
++
++		opp-998400000 {
++			opp-hz = /bits/ 64 <998400000>;
++		};
++		opp-1094400000 {
++			opp-hz = /bits/ 64 <1094400000>;
++		};
++		opp-1152000000 {
++			opp-hz = /bits/ 64 <1152000000>;
++		};
++		opp-1209600000 {
++			opp-hz = /bits/ 64 <1209600000>;
++		};
++	};
++
+ 	haptic {
+ 		compatible = "regulator-haptic";
+ 		haptic-supply = <&reg_vdd_motor>;
+@@ -138,6 +155,14 @@ reg_touch_key: regulator-touch-key {
+ 	};
+ };
+ 
++&a53pll {
++	/*
++	 * The driver's built-in table programs 1190.4 MHz for its 1152 MHz
++	 * entry; with an OPP table it derives the multiplier from the rate.
++	 */
++	operating-points-v2 = <&a53pll_opp_table>;
++};
++
+ &accelerometer {
+ 	vdd-supply = <&pm8916_l5>;
+ 	vddio-supply = <&pm8916_l5>;
+@@ -242,6 +267,61 @@ front_camera_ep: endpoint {
+ 	};
+ };
+ 
++&CPU0 {
++	cpu-supply = <&pm8916_spmi_s2>;
++};
++
++&CPU1 {
++	cpu-supply = <&pm8916_spmi_s2>;
++};
++
++&CPU2 {
++	cpu-supply = <&pm8916_spmi_s2>;
++};
++
++&CPU3 {
++	cpu-supply = <&pm8916_spmi_s2>;
++};
++
++/*
++ * Up to 998.4 MHz the CPU rail stays at the 1.15 V the bootloader leaves
++ * it at, as before. The higher rates need the turbo voltage: 1.30 V is
++ * the fused open-loop value of the tested unit (1.25 V) plus the 50 mV
++ * the vendor kernel adds; the vendor ceiling for any unit is 1.35 V.
++ * There is no CPR, memory accelerator or VDD_MX handling for them, so
++ * they are turbo-mode: off until enabled through
++ * /sys/devices/system/cpu/cpufreq/boost.
++ */
++&cpu_opp_table {
++	opp-200000000 {
++		opp-microvolt = <1150000>;
++	};
++	opp-400000000 {
++		opp-microvolt = <1150000>;
++	};
++	opp-800000000 {
++		opp-microvolt = <1150000>;
++	};
++	opp-998400000 {
++		opp-microvolt = <1150000>;
++	};
++	opp-1094400000 {
++		opp-hz = /bits/ 64 <1094400000>;
++		opp-microvolt = <1300000>;
++		turbo-mode;
++	};
++	opp-1152000000 {
++		opp-hz = /bits/ 64 <1152000000>;
++		opp-microvolt = <1300000>;
++		turbo-mode;
++	};
++	opp-1209600000 {
++		opp-hz = /bits/ 64 <1209600000>;
++		opp-microvolt = <1300000>;
++		turbo-mode;
++	};
++};
++
+ &i2c_sensors {
+ 	proximity@44 {
+ 		compatible = "sharp,gp2ap002s00f";
+@@ -279,6 +359,19 @@ &mdss_mdp {
+ 	interconnect-names = "mdp0-mem";
+ };
+ 
++&pm8916_1 {
++	regulators {
++		compatible = "qcom,pm8916-regulators";
++
++		/* VDD_APC, the CPU rail; not managed by the RPM */
++		pm8916_spmi_s2: s2 {
++			regulator-min-microvolt = <1150000>;
++			regulator-max-microvolt = <1350000>;
++			regulator-always-on;
++		};
++	};
++};
++
+ &pm8916_codec {
+ 	qcom,micbias1-ext-cap;
+ };
+-- 
+2.56.0
+
